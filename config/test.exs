@@ -2,7 +2,7 @@ import Config
 
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
-config :ingest, IngestWeb.Endpoint,
+config :curator, CuratorWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
   secret_key_base: "3otlny5NT52qmSovNHGWCFJbAft/XAMOrn9gul/eah8NCC+ca1bbTdvdoVQ08w2G",
   server: false

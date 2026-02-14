@@ -6,7 +6,7 @@ import Config
 # The watchers configuration can be used to run external
 # watchers to your application. For example, we can use it
 # to bundle .js and .css sources.
-config :ingest, IngestWeb.Endpoint,
+config :curator, CuratorWeb.Endpoint,
   # Binding to loopback ipv4 address prevents access from other machines.
   # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
   http: [ip: {127, 0, 0, 1}],
@@ -15,8 +15,8 @@ config :ingest, IngestWeb.Endpoint,
   debug_errors: true,
   secret_key_base: "79lyzyK46pXnXVRysBsS1sz6MATaIudwY3TNMC2+51UkJBNUcjdc3hJN7lE2qUBu",
   watchers: [
-    esbuild: {Esbuild, :install_and_run, [:ingest, ~w(--sourcemap=inline --watch)]},
-    tailwind: {Tailwind, :install_and_run, [:ingest, ~w(--watch)]}
+    esbuild: {Esbuild, :install_and_run, [:curator, ~w(--sourcemap=inline --watch)]},
+    tailwind: {Tailwind, :install_and_run, [:curator, ~w(--watch)]}
   ]
 
 # ## SSL Support
@@ -43,7 +43,7 @@ config :ingest, IngestWeb.Endpoint,
 # different ports.
 
 # Reload browser tabs when matching files change.
-config :ingest, IngestWeb.Endpoint,
+config :curator, CuratorWeb.Endpoint,
   live_reload: [
     web_console_logger: true,
     patterns: [
@@ -52,13 +52,13 @@ config :ingest, IngestWeb.Endpoint,
       # Gettext translations
       ~r"priv/gettext/.*\.po$"E,
       # Router, Controllers, LiveViews and LiveComponents
-      ~r"lib/ingest_web/router\.ex$"E,
-      ~r"lib/ingest_web/(controllers|live|components)/.*\.(ex|heex)$"E
+      ~r"lib/curator_web/router\.ex$"E,
+      ~r"lib/curator_web/(controllers|live|components)/.*\.(ex|heex)$"E
     ]
   ]
 
 # Enable dev routes for dashboard and mailbox
-config :ingest, dev_routes: true
+config :curator, dev_routes: true
 
 # Do not include metadata nor timestamps in development logs
 config :logger, :default_formatter, format: "[$level] $message\n"

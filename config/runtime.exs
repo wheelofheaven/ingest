@@ -12,25 +12,27 @@ import Config
 # If you use `mix release`, you need to explicitly enable the server
 # by passing the PHX_SERVER=true when you start it:
 #
-#     PHX_SERVER=true bin/ingest start
+#     PHX_SERVER=true bin/curator start
 #
 # Alternatively, you can use `mix phx.gen.release` to generate a `bin/server`
 # script that automatically sets the env var above.
 # Pipeline configuration
-config :ingest,
+config :curator,
   zai_api_key: System.get_env("ZAI_API_KEY"),
   anthropic_api_key: System.get_env("ANTHROPIC_API_KEY"),
   data_library_path: System.get_env("DATA_LIBRARY_PATH", "../data-library"),
   data_sources_path: System.get_env("DATA_SOURCES_PATH", "../data-sources"),
-  data_work_path: System.get_env("DATA_WORK_PATH", "../ingest-work"),
+  data_content_path: System.get_env("DATA_CONTENT_PATH", "../data-content"),
+  data_images_path: System.get_env("DATA_IMAGES_PATH", "../data-images"),
+  data_work_path: System.get_env("DATA_WORK_PATH", "../curator-work"),
   default_languages: ~w(en fr de es ru ja zh),
   llm_confidence_threshold: 0.7
 
 if System.get_env("PHX_SERVER") do
-  config :ingest, IngestWeb.Endpoint, server: true
+  config :curator, CuratorWeb.Endpoint, server: true
 end
 
-config :ingest, IngestWeb.Endpoint,
+config :curator, CuratorWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
 if config_env() == :prod do
@@ -48,9 +50,9 @@ if config_env() == :prod do
 
   host = System.get_env("PHX_HOST") || "example.com"
 
-  config :ingest, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
+  config :curator, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
-  config :ingest, IngestWeb.Endpoint,
+  config :curator, CuratorWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [
       # Enable IPv6 and bind on all interfaces.
@@ -66,7 +68,7 @@ if config_env() == :prod do
   # To get SSL working, you will need to add the `https` key
   # to your endpoint configuration:
   #
-  #     config :ingest, IngestWeb.Endpoint,
+  #     config :curator, CuratorWeb.Endpoint,
   #       https: [
   #         ...,
   #         port: 443,
@@ -88,7 +90,7 @@ if config_env() == :prod do
   # We also recommend setting `force_ssl` in your config/prod.exs,
   # ensuring no data is ever sent via http, always redirecting to https:
   #
-  #     config :ingest, IngestWeb.Endpoint,
+  #     config :curator, CuratorWeb.Endpoint,
   #       force_ssl: [hsts: true]
   #
   # Check `Plug.SSL` for all available options in `force_ssl`.

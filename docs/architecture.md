@@ -7,7 +7,7 @@
  │                     Wheel of Heaven                          │
  │                                                              │
  │  ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐  │
- │  │ data-sources │   │ ingest │   │  data-library    │  │
+ │  │ data-sources │   │ curator│   │  data-library    │  │
  │  │   (private)  │──▶│  (this repo) │──▶│   (public)       │  │
  │  │              │   │              │   │                  │  │
  │  │  Source PDFs │   │  OCR, parse, │   │  Structured JSON │  │
@@ -23,7 +23,7 @@
  └──────────────────────────────────────────────────────────────┘
 ```
 
-ingest sits between raw source material and the public data-library.
+curator sits between raw source material and the public data-library.
 It uses the z.ai API for both OCR extraction and LLM-powered tasks
 (refinement, translation).
 
@@ -42,7 +42,7 @@ It uses the z.ai API for both OCR extraction and LLM-powered tasks
 ## Project Structure
 
 ```
-ingest/
+curator/
 ├── config/
 │   ├── config.exs               # Compile-time config
 │   ├── dev.exs                  # Dev settings
@@ -50,7 +50,7 @@ ingest/
 │   └── runtime.exs              # Runtime config (env vars, API keys)
 │
 ├── lib/
-│   ├── ingest/
+│   ├── curator/
 │   │   ├── application.ex       # OTP supervision tree
 │   │   ├── pipeline.ex          # Top-level orchestrator
 │   │   │
@@ -98,7 +98,7 @@ ingest/
 │   │   └── store/
 │   │       └── job.ex           #   ETS-based job state tracking
 │   │
-│   ├── ingest_web/
+│   ├── curator_web/
 │   │   ├── router.ex            # Routes
 │   │   └── live/
 │   │       ├── dashboard_live.ex  # Upload, job tracking, stage status
@@ -111,7 +111,7 @@ ingest/
 │       ├── pdf.normalize.ex     #   mix pdf.normalize
 │       ├── pdf.translate.ex     #   mix pdf.translate
 │       ├── pdf.export.ex        #   mix pdf.export
-│       └── pdf.ingest.ex        #   mix pdf.ingest (full pipeline)
+│       └── curator.run.ex        #   mix curator.run (full pipeline)
 │
 ├── priv/
 │   ├── rules/                   # Rule config files (JSON)
@@ -197,7 +197,7 @@ This design enables:
 
 ### Unified LLM Client
 
-`Ingest.LLM.Client` provides a single interface for all LLM calls.
+`Curator.LLM.Client` provides a single interface for all LLM calls.
 It supports two providers:
 
 | Provider  | API                     | Model         | Usage                          |
@@ -280,9 +280,9 @@ Confidence scores are used internally by the refiner but not exported.
 ## Supervision Tree
 
 ```
-Ingest.Application
-└── Ingest.Store.Job (GenServer)
-      ETS table :ingest_jobs
+Curator.Application
+└── Curator.Store.Job (GenServer)
+      ETS table :curator_jobs
       Broadcasts via Phoenix.PubSub "jobs" topic
 ```
 

@@ -12,8 +12,8 @@ mise will install the correct versions of Erlang and Elixir automatically.
 Clone the repo and install dependencies:
 
 ```sh
-git clone git@github.com:wheelofheaven/ingest.git
-cd ingest
+git clone git@github.com:wheelofheaven/curator.git
+cd curator
 mise install        # Installs Erlang 28 + Elixir 1.19
 mise run setup      # mix deps.get && mix compile
 ```
@@ -41,7 +41,7 @@ The pipeline expects sibling directories for data:
 
 ```
 wheelofheaven/
-  ingest/               # This repo
+  curator/               # This repo
   data-library/               # Output: structured JSON books
   data-sources/               # Input: source PDFs with sidecar metadata
     pdf/
@@ -57,7 +57,7 @@ DATA_LIBRARY_PATH=../data-library
 DATA_SOURCES_PATH=../data-sources
 ```
 
-## Your First Ingestion
+## Your First Curation
 
 ### Option A: Step-by-Step (Recommended)
 
@@ -102,7 +102,7 @@ Writes the final JSON to `../data-library/my-book/`.
 Run everything in one command:
 
 ```sh
-mise run ingest -- ../data-sources/pdf/_combined/book.pdf \
+mise run curator -- ../data-sources/pdf/_combined/book.pdf \
   --slug my-book \
   --code MB \
   --lang fr \
@@ -169,14 +169,14 @@ Then in IEx:
 
 ```elixir
 # Check stage status
-Ingest.Pipeline.status("my-book")
+Curator.Pipeline.status("my-book")
 
 # Load and inspect a normalized book
-{:ok, json} = Ingest.Stages.Normalize.load("my-book")
+{:ok, json} = Curator.Stages.Normalize.load("my-book")
 length(json["chapters"])
 
 # Run OCR programmatically
-{:ok, result} = Ingest.Stages.OCR.run("path/to/book.pdf", "my-book")
+{:ok, result} = Curator.Stages.OCR.run("path/to/book.pdf", "my-book")
 ```
 
 ## Rule Profiles

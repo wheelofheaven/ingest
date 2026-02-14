@@ -163,13 +163,13 @@ mise run export -- --slug my-book --output ../data-library
 To run everything in one go:
 
 ```
-mise run ingest -- path/to/book.pdf --slug my-book --code MB --lang fr --rules raelian
+mise run curator -- path/to/book.pdf --slug my-book --code MB --lang fr --rules raelian
 ```
 
 Or with translation:
 
 ```
-mise run ingest -- path/to/book.pdf --slug my-book --code MB --lang fr --translate --langs en,de
+mise run curator -- path/to/book.pdf --slug my-book --code MB --lang fr --translate --langs en,de
 ```
 
 ## Re-running Stages

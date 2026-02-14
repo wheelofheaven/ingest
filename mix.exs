@@ -1,9 +1,9 @@
-defmodule Ingest.MixProject do
+defmodule Curator.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :ingest,
+      app: :curator,
       version: "0.1.0",
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -20,7 +20,7 @@ defmodule Ingest.MixProject do
   # Type `mix help compile.app` for more information.
   def application do
     [
-      mod: {Ingest.Application, []},
+      mod: {Curator.Application, []},
       extra_applications: [:logger, :runtime_tools]
     ]
   end
@@ -62,7 +62,8 @@ defmodule Ingest.MixProject do
       {:bandit, "~> 1.5"},
       {:req, "~> 0.5"},
       {:ex_json_schema, "~> 0.10"},
-      {:floki, "~> 0.36"}
+      {:floki, "~> 0.36"},
+      {:yaml_elixir, "~> 2.11"}
     ]
   end
 
@@ -76,10 +77,10 @@ defmodule Ingest.MixProject do
     [
       setup: ["deps.get", "assets.setup", "assets.build"],
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
-      "assets.build": ["compile", "tailwind ingest", "esbuild ingest"],
+      "assets.build": ["compile", "tailwind curator", "esbuild curator"],
       "assets.deploy": [
-        "tailwind ingest --minify",
-        "esbuild ingest --minify",
+        "tailwind curator --minify",
+        "esbuild curator --minify",
         "phx.digest"
       ],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
