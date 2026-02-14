@@ -108,25 +108,38 @@ defmodule Ingest.Stages.Normalize do
   defp book_from_json(json) do
     chapters =
       Enum.map(json["chapters"] || [], fn ch ->
-        paragraphs =
-          Enum.map(ch["paragraphs"] || [], fn p ->
-            %Ingest.Schema.Paragraph{
-              n: p["n"],
-              speaker: p["speaker"],
-              text: p["text"],
-              i18n: p["i18n"] || %{},
-              ref_id: p["refId"],
-              confidence: p["confidence"] || 1.0
-            }
-          end)
+        has_sections = is_list(ch["sections"]) and ch["sections"] != []
 
-        %Ingest.Schema.Chapter{
-          n: ch["n"],
-          title: ch["title"],
-          i18n: ch["i18n"] || %{},
-          paragraphs: paragraphs,
-          ref_id: ch["refId"]
-        }
+        if has_sections do
+          sections =
+            Enum.map(ch["sections"], fn s ->
+              paragraphs = paragraphs_from_json(s["paragraphs"] || [])
+
+              %Ingest.Schema.Section{
+                n: s["n"],
+                title: s["title"],
+                i18n: s["i18n"] || %{},
+                paragraphs: paragraphs
+              }
+            end)
+
+          %Ingest.Schema.Chapter{
+            n: ch["n"],
+            title: ch["title"],
+            i18n: ch["i18n"] || %{},
+            paragraphs: [],
+            sections: sections,
+            ref_id: ch["refId"]
+          }
+        else
+          %Ingest.Schema.Chapter{
+            n: ch["n"],
+            title: ch["title"],
+            i18n: ch["i18n"] || %{},
+            paragraphs: paragraphs_from_json(ch["paragraphs"] || []),
+            ref_id: ch["refId"]
+          }
+        end
       end)
 
     Book.new(%{
@@ -138,5 +151,23 @@ defmodule Ingest.Stages.Normalize do
       chapters: chapters,
       revision: json["revision"] || 1
     })
+  end
+
+  defp paragraphs_from_json(list) do
+    Enum.map(list, fn p ->
+      %Ingest.Schema.Paragraph{
+        n: p["n"],
+        speaker: p["speaker"],
+        text: p["text"],
+        i18n: p["i18n"] || %{},
+        ref_id: p["refId"],
+        confidence: p["confidence"] || 1.0,
+        vetted: case p["_vetted"] do
+          "skipped" -> :skipped
+          true -> true
+          _ -> false
+        end
+      }
+    end)
   end
 end

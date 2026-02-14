@@ -2,15 +2,16 @@ defmodule IngestWeb.EditorLive do
   use IngestWeb, :live_view
 
   alias Ingest.Store.Job
-  alias Ingest.Schema.{Book, Chapter, Paragraph}
+  alias Ingest.Schema.{Book, Chapter, Paragraph, Section}
   alias Ingest.Stages.{WorkDir, Normalize}
+  alias Ingest.Git
 
   @impl true
   def mount(params, _session, socket) do
     case load_book(params) do
       {:ok, book, slug, source} ->
         repeated = detect_repeated_patterns(book)
-        speakers = load_speakers(book)
+        speakers = load_speakers(slug, book)
 
         {:ok,
          socket
@@ -22,11 +23,14 @@ defmodule IngestWeb.EditorLive do
          |> assign(:selected_chapter, 1)
          |> assign(:editing_paragraph, nil)
          |> assign(:editing_chapter, nil)
+         |> assign(:editing_section, nil)
+         |> assign(:editing_metadata, false)
          |> assign(:focused_ref, nil)
          |> assign(:selected_refs, MapSet.new())
          |> assign(:repeated_patterns, repeated)
          |> assign(:show_patterns, false)
          |> assign(:dirty, false)
+         |> assign(:synced, !Git.has_unpushed?())
          |> assign(:page_title, "Edit: #{slug}")}
 
       {:error, message} ->
@@ -124,7 +128,7 @@ defmodule IngestWeb.EditorLive do
 
     refs =
       if chapter,
-        do: MapSet.new(Enum.map(chapter.paragraphs, & &1.ref_id)),
+        do: MapSet.new(Enum.map(Chapter.all_paragraphs(chapter), & &1.ref_id)),
         else: MapSet.new()
 
     {:noreply, assign(socket, :selected_refs, refs)}
@@ -181,7 +185,7 @@ defmodule IngestWeb.EditorLive do
 
     matching_refs =
       book.chapters
-      |> Enum.flat_map(& &1.paragraphs)
+      |> Enum.flat_map(&Chapter.all_paragraphs/1)
       |> Enum.filter(fn p -> String.trim(p.text) == pattern end)
       |> Enum.map(& &1.ref_id)
 
@@ -200,7 +204,7 @@ defmodule IngestWeb.EditorLive do
 
     matching_refs =
       book.chapters
-      |> Enum.flat_map(& &1.paragraphs)
+      |> Enum.flat_map(&Chapter.all_paragraphs/1)
       |> Enum.filter(fn p -> String.trim(p.text) == pattern end)
       |> Enum.map(& &1.ref_id)
       |> MapSet.new()
@@ -270,10 +274,11 @@ defmodule IngestWeb.EditorLive do
     chapter = get_chapter(book, chapter_n)
 
     if chapter do
-      idx = Enum.find_index(chapter.paragraphs, &(&1.ref_id == ref_id))
+      all_paras = Chapter.all_paragraphs(chapter)
+      idx = Enum.find_index(all_paras, &(&1.ref_id == ref_id))
 
       if idx && idx > 0 do
-        prev = Enum.at(chapter.paragraphs, idx - 1)
+        prev = Enum.at(all_paras, idx - 1)
         book = glue_paragraph_pair(book, chapter_n, prev.ref_id)
 
         {:noreply,
@@ -305,6 +310,127 @@ defmodule IngestWeb.EditorLive do
      |> assign(:editing_chapter, new_chapter_n)
      |> assign(:dirty, true)
      |> put_flash(:info, "Chapter break inserted — name your new chapter")}
+  end
+
+  # -- Section break insertion --
+
+  def handle_event("insert_section_break", %{"ref-id" => ref_id}, socket) do
+    book = socket.assigns.book
+    chapter_n = socket.assigns.selected_chapter
+    book = split_section_at_paragraph(book, chapter_n, ref_id)
+
+    {:noreply,
+     socket
+     |> assign(:book, book)
+     |> assign(:editing_section, {chapter_n, :new})
+     |> assign(:dirty, true)
+     |> put_flash(:info, "Section break inserted")}
+  end
+
+  def handle_event("remove_section_break", %{"chapter" => ch_str, "section" => s_str}, socket) do
+    ch_n = String.to_integer(ch_str)
+    s_n = String.to_integer(s_str)
+    book = socket.assigns.book
+
+    if s_n > 1 do
+      book = merge_sections(book, ch_n, s_n - 1)
+
+      {:noreply,
+       socket
+       |> assign(:book, book)
+       |> assign(:dirty, true)
+       |> put_flash(:info, "Section break removed")}
+    else
+      {:noreply, put_flash(socket, :error, "Cannot remove the first section break")}
+    end
+  end
+
+  def handle_event("rename_section", %{"chapter" => ch_str, "section" => s_str, "title" => title}, socket) do
+    ch_n = String.to_integer(ch_str)
+    s_n = String.to_integer(s_str)
+    book = socket.assigns.book
+
+    chapters =
+      Enum.map(book.chapters, fn ch ->
+        if ch.n == ch_n do
+          sections =
+            Enum.map(ch.sections, fn s ->
+              if s.n == s_n, do: %{s | title: String.trim(title)}, else: s
+            end)
+
+          %{ch | sections: sections}
+        else
+          ch
+        end
+      end)
+
+    {:noreply,
+     socket
+     |> assign(:book, %{book | chapters: chapters})
+     |> assign(:editing_section, nil)
+     |> assign(:dirty, true)}
+  end
+
+  def handle_event("edit_section_title", %{"chapter" => ch_str, "section" => s_str}, socket) do
+    {:noreply, assign(socket, :editing_section, {String.to_integer(ch_str), String.to_integer(s_str)})}
+  end
+
+  def handle_event("cancel_edit_section", _params, socket) do
+    {:noreply, assign(socket, :editing_section, nil)}
+  end
+
+  def handle_event("delete_section", %{"chapter" => ch_str, "section" => s_str}, socket) do
+    ch_n = String.to_integer(ch_str)
+    s_n = String.to_integer(s_str)
+    book = socket.assigns.book
+
+    chapters =
+      Enum.map(book.chapters, fn ch ->
+        if ch.n == ch_n and Chapter.has_sections?(ch) do
+          sections = Enum.reject(ch.sections, &(&1.n == s_n))
+
+          if length(sections) <= 1 do
+            # Only one (or zero) section left — flatten
+            all_paras = Enum.flat_map(sections, & &1.paragraphs)
+            %{ch | paragraphs: all_paras, sections: []}
+          else
+            %{ch | sections: sections}
+          end
+        else
+          ch
+        end
+      end)
+
+    book = %{book | chapters: chapters} |> Book.assign_ref_ids()
+
+    {:noreply,
+     socket
+     |> assign(:book, book)
+     |> assign(:dirty, true)
+     |> put_flash(:info, "Section deleted")}
+  end
+
+  def handle_event("remove_all_section_breaks", %{"chapter" => ch_str}, socket) do
+    ch_n = String.to_integer(ch_str)
+    book = socket.assigns.book
+
+    chapters =
+      Enum.map(book.chapters, fn ch ->
+        if ch.n == ch_n and Chapter.has_sections?(ch) do
+          all_paras = Chapter.all_paragraphs(ch)
+          %{ch | paragraphs: all_paras, sections: []}
+        else
+          ch
+        end
+      end)
+
+    book = %{book | chapters: chapters} |> Book.assign_ref_ids()
+
+    {:noreply,
+     socket
+     |> assign(:book, book)
+     |> assign(:dirty, true)
+     |> put_flash(:info, "All section breaks removed")}
   end
 
   # -- Chapter editing --
@@ -369,25 +495,143 @@ defmodule IngestWeb.EditorLive do
      |> put_flash(:info, "Chapter deleted")}
   end
 
+  # -- Metadata editing --
+
+  def handle_event("toggle_metadata", _params, socket) do
+    {:noreply, assign(socket, :editing_metadata, !socket.assigns.editing_metadata)}
+  end
+
+  def handle_event("save_metadata", params, socket) do
+    book = socket.assigns.book
+
+    titles =
+      case params["title"] do
+        nil -> book.titles
+        title -> Map.put(book.titles, book.primary_lang || "en", String.trim(title))
+      end
+
+    primary_lang = String.trim(params["primary_lang"] || book.primary_lang || "en")
+
+    # If primary_lang changed and the title was under the old key, move it
+    titles =
+      if primary_lang != book.primary_lang and Map.has_key?(titles, book.primary_lang) do
+        {val, rest} = Map.pop(titles, book.primary_lang)
+        Map.put_new(rest, primary_lang, val)
+      else
+        titles
+      end
+
+    pub_year =
+      case Integer.parse(params["publication_year"] || "") do
+        {y, _} -> y
+        :error -> book.publication_year
+      end
+
+    code = String.trim(params["code"] || book.code || "")
+
+    book = %{book |
+      titles: titles,
+      primary_lang: primary_lang,
+      publication_year: pub_year,
+      code: if(code != "", do: code, else: book.code)
+    } |> Book.assign_ref_ids()
+
+    new_slug = String.trim(params["slug"] || socket.assigns.slug)
+    new_slug = if new_slug != "", do: new_slug, else: socket.assigns.slug
+    book = %{book | slug: new_slug}
+
+    {:noreply,
+     socket
+     |> assign(:book, book)
+     |> assign(:slug, new_slug)
+     |> assign(:editing_metadata, false)
+     |> assign(:dirty, true)
+     |> assign(:page_title, "Edit: #{new_slug}")}
+  end
+
   # -- Save --
 
   def handle_event("save_to_disk", _params, socket) do
     book = socket.assigns.book
     slug = socket.assigns.slug
+    saved_book = socket.assigns.saved_book
     json = Book.to_json(book)
     encoded = Jason.encode!(json, pretty: true)
     {:ok, path} = WorkDir.write_artifact(slug, "book.json", encoded)
+
+    # Persist speaker list
+    save_speakers(slug, socket.assigns.speakers)
 
     case socket.assigns.source do
       {:job, job_id} -> Job.update(job_id, %{book: book})
       _ -> :ok
     end
 
+    # Git commit
+    commit_message = build_commit_message(slug, saved_book, book)
+
+    flash =
+      case Git.commit(slug, commit_message) do
+        {:ok, :no_changes} -> "Saved to #{path}"
+        {:ok, sha} -> "Saved to #{path} (commit #{sha})"
+        {:error, reason} -> "Saved to #{path} (git error: #{reason})"
+      end
+
     {:noreply,
      socket
      |> assign(:saved_book, book)
      |> assign(:dirty, false)
-     |> put_flash(:info, "Saved to #{path}")}
+     |> assign(:synced, false)
+     |> put_flash(:info, flash)}
+  end
+
+  # -- Sync --
+
+  def handle_event("sync", _params, socket) do
+    case Git.push() do
+      :ok ->
+        {:noreply,
+         socket
+         |> assign(:synced, true)
+         |> put_flash(:info, "Pushed to origin")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Push failed: #{reason}")}
+    end
+  end
+
+  # -- Vetting --
+
+  def handle_event("toggle_vet", %{"ref-id" => ref_id}, socket) do
+    book = socket.assigns.book
+    para = find_paragraph(book, ref_id)
+
+    case para.vetted do
+      true ->
+        # Vetted → skipped (explicitly unvet)
+        book = update_paragraph(book, ref_id, fn p -> %{p | vetted: :skipped} end)
+        {:noreply, socket |> assign(:book, book) |> assign(:dirty, true)}
+
+      :skipped ->
+        # Skipped → re-vet (just this one, no waterfall)
+        book = update_paragraph(book, ref_id, fn p -> %{p | vetted: true} end)
+        {:noreply, socket |> assign(:book, book) |> assign(:dirty, true)}
+
+      false ->
+        # Unreviewed → vet + waterfall: vet all preceding `false` paragraphs
+        all_paras = book.chapters |> Enum.flat_map(&Chapter.all_paragraphs/1)
+        idx = Enum.find_index(all_paras, &(&1.ref_id == ref_id))
+
+        refs_to_vet =
+          all_paras
+          |> Enum.take(idx + 1)
+          |> Enum.filter(&(&1.vetted == false))
+          |> Enum.map(& &1.ref_id)
+          |> MapSet.new()
+
+        book = update_paragraphs(book, refs_to_vet, fn p -> %{p | vetted: true} end)
+        {:noreply, socket |> assign(:book, book) |> assign(:dirty, true)}
+    end
   end
 
   # -- Private helpers --
@@ -398,19 +642,61 @@ defmodule IngestWeb.EditorLive do
 
   defp find_paragraph(book, ref_id) do
     book.chapters
-    |> Enum.flat_map(& &1.paragraphs)
+    |> Enum.flat_map(&Chapter.all_paragraphs/1)
     |> Enum.find(&(&1.ref_id == ref_id))
   end
 
   defp update_paragraph(book, ref_id, update_fn) do
     chapters =
       Enum.map(book.chapters, fn chapter ->
-        paragraphs =
-          Enum.map(chapter.paragraphs, fn para ->
-            if para.ref_id == ref_id, do: update_fn.(para), else: para
-          end)
+        if Chapter.has_sections?(chapter) do
+          sections =
+            Enum.map(chapter.sections, fn section ->
+              paragraphs =
+                Enum.map(section.paragraphs, fn para ->
+                  if para.ref_id == ref_id, do: update_fn.(para), else: para
+                end)
 
-        %{chapter | paragraphs: paragraphs}
+              %{section | paragraphs: paragraphs}
+            end)
+
+          %{chapter | sections: sections}
+        else
+          paragraphs =
+            Enum.map(chapter.paragraphs, fn para ->
+              if para.ref_id == ref_id, do: update_fn.(para), else: para
+            end)
+
+          %{chapter | paragraphs: paragraphs}
+        end
+      end)
+
+    %{book | chapters: chapters}
+  end
+
+  defp update_paragraphs(book, ref_id_set, update_fn) do
+    chapters =
+      Enum.map(book.chapters, fn chapter ->
+        if Chapter.has_sections?(chapter) do
+          sections =
+            Enum.map(chapter.sections, fn section ->
+              paragraphs =
+                Enum.map(section.paragraphs, fn para ->
+                  if MapSet.member?(ref_id_set, para.ref_id), do: update_fn.(para), else: para
+                end)
+
+              %{section | paragraphs: paragraphs}
+            end)
+
+          %{chapter | sections: sections}
+        else
+          paragraphs =
+            Enum.map(chapter.paragraphs, fn para ->
+              if MapSet.member?(ref_id_set, para.ref_id), do: update_fn.(para), else: para
+            end)
+
+          %{chapter | paragraphs: paragraphs}
+        end
       end)
 
     %{book | chapters: chapters}
@@ -421,28 +707,72 @@ defmodule IngestWeb.EditorLive do
 
     chapters =
       Enum.map(book.chapters, fn chapter ->
-        paragraphs = Enum.reject(chapter.paragraphs, &MapSet.member?(ref_set, &1.ref_id))
-        %{chapter | paragraphs: paragraphs}
+        if Chapter.has_sections?(chapter) do
+          sections =
+            chapter.sections
+            |> Enum.map(fn section ->
+              paragraphs = Enum.reject(section.paragraphs, &MapSet.member?(ref_set, &1.ref_id))
+              %{section | paragraphs: paragraphs}
+            end)
+            |> Enum.reject(fn s -> s.paragraphs == [] end)
+
+          if sections == [] do
+            %{chapter | sections: [], paragraphs: []}
+          else
+            %{chapter | sections: sections}
+          end
+        else
+          paragraphs = Enum.reject(chapter.paragraphs, &MapSet.member?(ref_set, &1.ref_id))
+          %{chapter | paragraphs: paragraphs}
+        end
       end)
 
     %{book | chapters: chapters} |> Book.assign_ref_ids()
   end
 
   defp merge_paragraphs(chapter, ref_id) do
-    paragraphs = chapter.paragraphs
-    idx = Enum.find_index(paragraphs, &(&1.ref_id == ref_id))
+    if Chapter.has_sections?(chapter) do
+      # Merge within sections — get flat list, find pair, rebuild sections
+      all_paras = Chapter.all_paragraphs(chapter)
+      idx = Enum.find_index(all_paras, &(&1.ref_id == ref_id))
 
-    if idx && idx < length(paragraphs) - 1 do
-      current = Enum.at(paragraphs, idx)
-      next = Enum.at(paragraphs, idx + 1)
-      merged = %{current | text: current.text <> "\n\n" <> next.text}
+      if idx && idx < length(all_paras) - 1 do
+        current = Enum.at(all_paras, idx)
+        next_para = Enum.at(all_paras, idx + 1)
+        merged = %{current | text: current.text <> "\n\n" <> next_para.text}
+        next_ref = next_para.ref_id
 
-      paragraphs
-      |> List.delete_at(idx + 1)
-      |> List.replace_at(idx, merged)
-      |> then(&%{chapter | paragraphs: &1})
+        sections =
+          Enum.map(chapter.sections, fn section ->
+            paragraphs =
+              section.paragraphs
+              |> Enum.map(fn p -> if p.ref_id == current.ref_id, do: merged, else: p end)
+              |> Enum.reject(fn p -> p.ref_id == next_ref end)
+
+            %{section | paragraphs: paragraphs}
+          end)
+          |> Enum.reject(fn s -> s.paragraphs == [] end)
+
+        %{chapter | sections: sections}
+      else
+        chapter
+      end
     else
-      chapter
+      paragraphs = chapter.paragraphs
+      idx = Enum.find_index(paragraphs, &(&1.ref_id == ref_id))
+
+      if idx && idx < length(paragraphs) - 1 do
+        current = Enum.at(paragraphs, idx)
+        next = Enum.at(paragraphs, idx + 1)
+        merged = %{current | text: current.text <> "\n\n" <> next.text}
+
+        paragraphs
+        |> List.delete_at(idx + 1)
+        |> List.replace_at(idx, merged)
+        |> then(&%{chapter | paragraphs: &1})
+      else
+        chapter
+      end
     end
   end
 
@@ -450,7 +780,9 @@ defmodule IngestWeb.EditorLive do
     chapters =
       Enum.flat_map(book.chapters, fn chapter ->
         if chapter.n == chapter_n do
-          case Enum.find_index(chapter.paragraphs, &(&1.ref_id == ref_id)) do
+          all_paras = Chapter.all_paragraphs(chapter)
+
+          case Enum.find_index(all_paras, &(&1.ref_id == ref_id)) do
             nil ->
               [chapter]
 
@@ -458,7 +790,7 @@ defmodule IngestWeb.EditorLive do
               [chapter]
 
             idx ->
-              {before_paras, after_paras} = Enum.split(chapter.paragraphs, idx)
+              {before_paras, after_paras} = Enum.split(all_paras, idx)
 
               first_para = List.first(after_paras)
 
@@ -467,8 +799,9 @@ defmodule IngestWeb.EditorLive do
                   do: String.slice(first_para.text, 0, 60) |> String.trim(),
                   else: "New Chapter"
 
+              # Flatten: new chapters lose sections (user can re-add)
               [
-                %{chapter | paragraphs: before_paras},
+                %{chapter | paragraphs: before_paras, sections: []},
                 Chapter.new(%{n: chapter.n + 1, title: new_title, paragraphs: after_paras})
               ]
           end
@@ -487,7 +820,10 @@ defmodule IngestWeb.EditorLive do
     if idx && idx < length(chapters) - 1 do
       current = Enum.at(chapters, idx)
       next = Enum.at(chapters, idx + 1)
-      merged = %{current | paragraphs: current.paragraphs ++ next.paragraphs}
+
+      # Flatten both to paragraphs for a clean merge
+      all_paras = Chapter.all_paragraphs(current) ++ Chapter.all_paragraphs(next)
+      merged = %{current | paragraphs: all_paras, sections: []}
 
       chapters
       |> List.delete_at(idx + 1)
@@ -499,7 +835,115 @@ defmodule IngestWeb.EditorLive do
     end
   end
 
-  defp load_speakers(book) do
+  defp split_section_at_paragraph(book, chapter_n, ref_id) do
+    chapters =
+      Enum.map(book.chapters, fn chapter ->
+        if chapter.n == chapter_n do
+          if Chapter.has_sections?(chapter) do
+            # Find which section contains this paragraph and split it
+            sections =
+              Enum.flat_map(chapter.sections, fn section ->
+                case Enum.find_index(section.paragraphs, &(&1.ref_id == ref_id)) do
+                  nil ->
+                    [section]
+
+                  0 ->
+                    [section]
+
+                  idx ->
+                    {before, after_paras} = Enum.split(section.paragraphs, idx)
+                    first = List.first(after_paras)
+                    new_title = if first, do: String.slice(first.text, 0, 60) |> String.trim(), else: "New Section"
+
+                    [
+                      %{section | paragraphs: before},
+                      Section.new(%{n: section.n + 1, title: new_title, paragraphs: after_paras})
+                    ]
+                end
+              end)
+
+            %{chapter | sections: sections}
+          else
+            # No sections yet — create two sections from the flat paragraph list
+            all_paras = chapter.paragraphs
+
+            case Enum.find_index(all_paras, &(&1.ref_id == ref_id)) do
+              nil ->
+                chapter
+
+              0 ->
+                chapter
+
+              idx ->
+                {before, after_paras} = Enum.split(all_paras, idx)
+                first = List.first(after_paras)
+                title1 = chapter.title || "Section 1"
+                title2 = if first, do: String.slice(first.text, 0, 60) |> String.trim(), else: "Section 2"
+
+                sections = [
+                  Section.new(%{n: 1, title: title1, paragraphs: before}),
+                  Section.new(%{n: 2, title: title2, paragraphs: after_paras})
+                ]
+
+                %{chapter | paragraphs: [], sections: sections}
+            end
+          end
+        else
+          chapter
+        end
+      end)
+
+    %{book | chapters: chapters} |> Book.assign_ref_ids()
+  end
+
+  defp merge_sections(book, ch_n, section_n) do
+    chapters =
+      Enum.map(book.chapters, fn chapter ->
+        if chapter.n == ch_n and Chapter.has_sections?(chapter) do
+          idx = Enum.find_index(chapter.sections, &(&1.n == section_n))
+
+          if idx && idx < length(chapter.sections) - 1 do
+            current = Enum.at(chapter.sections, idx)
+            next = Enum.at(chapter.sections, idx + 1)
+            merged = %{current | paragraphs: current.paragraphs ++ next.paragraphs}
+
+            sections =
+              chapter.sections
+              |> List.delete_at(idx + 1)
+              |> List.replace_at(idx, merged)
+
+            if length(sections) <= 1 do
+              # Only one section left — flatten back to chapter paragraphs
+              %{chapter | paragraphs: Chapter.all_paragraphs(%{chapter | sections: sections}), sections: []}
+            else
+              %{chapter | sections: sections}
+            end
+          else
+            chapter
+          end
+        else
+          chapter
+        end
+      end)
+
+    %{book | chapters: chapters} |> Book.assign_ref_ids()
+  end
+
+  defp load_speakers(slug, book) do
+    # Try loading persisted speaker list first
+    case WorkDir.read_artifact(slug, "speakers.json") do
+      {:ok, content} ->
+        case Jason.decode(content) do
+          {:ok, list} when is_list(list) -> list
+          _ -> build_default_speakers(book)
+        end
+
+      {:error, _} ->
+        build_default_speakers(book)
+    end
+  end
+
+  defp build_default_speakers(book) do
     # Collect speakers from all rule profiles
     rules_speakers =
       Path.wildcard("priv/rules/*.json")
@@ -517,7 +961,7 @@ defmodule IngestWeb.EditorLive do
     # Collect speakers already in the book
     book_speakers =
       book.chapters
-      |> Enum.flat_map(& &1.paragraphs)
+      |> Enum.flat_map(&Chapter.all_paragraphs/1)
       |> Enum.map(& &1.speaker)
       |> Enum.reject(&is_nil/1)
 
@@ -525,6 +969,11 @@ defmodule IngestWeb.EditorLive do
     (["Narrator"] ++ rules_speakers ++ book_speakers)
     |> Enum.uniq()
     |> Enum.sort()
+  end
+
+  defp save_speakers(slug, speakers) do
+    encoded = Jason.encode!(speakers, pretty: true)
+    WorkDir.write_artifact(slug, "speakers.json", encoded)
   end
 
   defp glue_paragraph_pair(book, chapter_n, ref_id) do
@@ -536,17 +985,36 @@ defmodule IngestWeb.EditorLive do
     %{book | chapters: updated_chapters} |> Book.assign_ref_ids()
   end
 
-  defp speaker_initials(speaker) do
-    speaker
-    |> String.split(~r/\s+/)
-    |> Enum.map(&String.first/1)
-    |> Enum.join()
-    |> String.upcase()
+  defp speaker_abbreviations(speakers) do
+    # Build unique abbreviations: start with 1 char, bump colliding ones to 2, etc.
+    speakers
+    |> Enum.map(fn name -> {name, String.upcase(String.slice(name, 0, 1))} end)
+    |> resolve_collisions(speakers, 2)
+    |> Map.new()
+  end
+
+  defp resolve_collisions(pairs, speakers, depth) do
+    # Group by abbreviation to find collisions
+    groups = Enum.group_by(pairs, fn {_name, abbr} -> abbr end)
+
+    Enum.flat_map(groups, fn {_abbr, group} ->
+      if length(group) > 1 and depth <= 4 do
+        # Collision — bump all in this group to more chars
+        bumped =
+          Enum.map(group, fn {name, _} ->
+            {name, String.upcase(String.slice(name, 0, depth))}
+          end)
+
+        resolve_collisions(bumped, speakers, depth + 1)
+      else
+        group
+      end
+    end)
   end
 
   defp detect_repeated_patterns(book) do
     book.chapters
-    |> Enum.flat_map(& &1.paragraphs)
+    |> Enum.flat_map(&Chapter.all_paragraphs/1)
     |> Enum.map(fn p -> String.trim(p.text) end)
     |> Enum.reject(&(&1 == ""))
     |> Enum.frequencies()
@@ -563,12 +1031,12 @@ defmodule IngestWeb.EditorLive do
 
     saved_texts =
       saved_book.chapters
-      |> Enum.flat_map(& &1.paragraphs)
+      |> Enum.flat_map(&Chapter.all_paragraphs/1)
       |> MapSet.new(& &1.text)
 
     current_texts =
       current_book.chapters
-      |> Enum.flat_map(& &1.paragraphs)
+      |> Enum.flat_map(&Chapter.all_paragraphs/1)
       |> MapSet.new(& &1.text)
 
     added = MapSet.difference(current_texts, saved_texts) |> MapSet.size()
@@ -585,6 +1053,93 @@ defmodule IngestWeb.EditorLive do
     }
   end
 
+  defp build_commit_message(slug, saved_book, book) do
+    saved_paras = saved_book.chapters |> Enum.flat_map(&Chapter.all_paragraphs/1)
+    current_paras = book.chapters |> Enum.flat_map(&Chapter.all_paragraphs/1)
+
+    saved_map = Map.new(saved_paras, &{&1.ref_id, &1})
+    current_map = Map.new(current_paras, &{&1.ref_id, &1})
+
+    all_refs = MapSet.union(MapSet.new(Map.keys(saved_map)), MapSet.new(Map.keys(current_map)))
+
+    text_changes = []
+    speaker_changes = []
+    vet_changes = []
+
+    {text_changes, speaker_changes, vet_changes} =
+      Enum.reduce(all_refs, {text_changes, speaker_changes, vet_changes}, fn ref, {tc, sc, vc} ->
+        old = Map.get(saved_map, ref)
+        new = Map.get(current_map, ref)
+
+        cond do
+          is_nil(old) or is_nil(new) ->
+            {tc, sc, vc}
+
+          old.text != new.text ->
+            {[ref | tc], sc, vc}
+
+          old.speaker != new.speaker ->
+            speaker_desc = "#{ref} (#{old.speaker || "nil"} → #{new.speaker || "nil"})"
+            {tc, [speaker_desc | sc], vc}
+
+          old.vetted != new.vetted ->
+            {tc, sc, [ref | vc]}
+
+          true ->
+            {tc, sc, vc}
+        end
+      end)
+
+    # Count structural changes
+    ch_diff = Book.chapter_count(book) - Book.chapter_count(saved_book)
+    p_diff = Book.paragraph_count(book) - Book.paragraph_count(saved_book)
+
+    changes = length(text_changes) + length(speaker_changes) + length(vet_changes) + abs(ch_diff) + abs(p_diff)
+
+    # Determine which chapters were affected
+    affected_chapters =
+      (text_changes ++ Enum.map(speaker_changes, fn s -> s |> String.split(" ") |> hd() end) ++ vet_changes)
+      |> Enum.map(fn ref -> ref |> String.split(":") |> hd() |> String.split("-") |> Enum.drop(1) |> Enum.join("-") end)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    ch_summary = if affected_chapters != [], do: " in ch " <> Enum.join(affected_chapters, ", "), else: ""
+    summary = "#{changes} changes#{ch_summary}"
+
+    details =
+      [
+        if(text_changes != [], do: "Text: #{Enum.join(Enum.reverse(text_changes), ", ")}"),
+        if(speaker_changes != [], do: "Speaker: #{Enum.join(Enum.reverse(speaker_changes), ", ")}"),
+        if vet_changes != [] do
+          count = length(vet_changes)
+          if count <= 5 do
+            "Vetted: #{Enum.join(Enum.reverse(vet_changes), ", ")}"
+          else
+            "Vetted: #{count} paragraphs"
+          end
+        end,
+        if(ch_diff != 0, do: "Chapters: #{if ch_diff > 0, do: "+"}#{ch_diff}"),
+        if(p_diff != 0, do: "Paragraphs: #{if p_diff > 0, do: "+"}#{p_diff}")
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n")
+
+    if details != "" do
+      "edit(#{slug}): #{summary}\n\n#{details}"
+    else
+      "edit(#{slug}): save (no structural changes)"
+    end
+  end
+
+  defp vetting_stats(book) do
+    all_paras = book.chapters |> Enum.flat_map(&Chapter.all_paragraphs/1)
+    total = length(all_paras)
+    vetted = Enum.count(all_paras, &(&1.vetted == true))
+    skipped = Enum.count(all_paras, &(&1.vetted == :skipped))
+    pct = if total > 0, do: round(vetted / total * 100), else: 0
+    %{total: total, vetted: vetted, skipped: skipped, pct: pct}
+  end
+
   defp focused_paragraph_json(book, ref_id) do
     case find_paragraph(book, ref_id) do
       nil -> nil
@@ -593,21 +1148,141 @@ defmodule IngestWeb.EditorLive do
   end
 
   defp focused_chapter_json(chapter) do
-    %{
+    base = %{
       "n" => chapter.n,
       "title" => chapter.title,
       "refId" => chapter.ref_id,
-      "paragraphCount" => length(chapter.paragraphs)
+      "paragraphCount" => Chapter.paragraph_count(chapter)
     }
-    |> Jason.encode!(pretty: true)
+
+    base =
+      if Chapter.has_sections?(chapter) do
+        Map.put(base, "sectionCount", length(chapter.sections))
+      else
+        base
+      end
+
+    Jason.encode!(base, pretty: true)
   end
 
   # -- Render --
+
+  defp render_paragraph(assigns, para) do
+    assigns = assign(assigns, :para, para)
+
+    ~H"""
+    <div
+      data-ref-id={@para.ref_id}
+      class={"group flex rounded transition-colors #{cond do
+        MapSet.member?(@selected_refs, @para.ref_id) -> "bg-primary/5 ring-1 ring-primary/20"
+        @focused_ref == @para.ref_id -> "bg-base-200"
+        true -> "hover:bg-base-200/50"
+      end}"}
+    >
+      <%!-- Vet gutter — full height click target --%>
+      <button
+        phx-click="toggle_vet"
+        phx-value-ref-id={@para.ref_id}
+        class={"w-6 shrink-0 flex items-center justify-center cursor-pointer rounded-l transition-colors #{case @para.vetted do
+          true -> "bg-success/20 text-success hover:bg-success/30"
+          :skipped -> "bg-warning/10 text-warning/60 hover:bg-warning/20"
+          _ -> "text-base-content/15 hover:bg-success/10 hover:text-success/50"
+        end}"}
+        title={case @para.vetted do
+          true -> "Unvet"
+          :skipped -> "Re-vet"
+          _ -> "Mark as vetted (+ all above)"
+        end}
+      >
+        <span class="text-xs font-bold">{case @para.vetted do
+          true -> "✓"
+          :skipped -> "–"
+          _ -> ""
+        end}</span>
+      </button>
+
+      <%!-- Content area --%>
+      <div class="flex-1 min-w-0 py-1.5 px-2">
+        <%!-- Line 1: metadata + actions --%>
+        <div class="flex items-center gap-2 mb-0.5">
+          <input
+            type="checkbox"
+            class="checkbox checkbox-xs checkbox-primary opacity-0 group-hover:opacity-100 transition-opacity"
+            checked={MapSet.member?(@selected_refs, @para.ref_id)}
+            phx-click="toggle_select"
+            phx-value-ref-id={@para.ref_id}
+            style={if MapSet.member?(@selected_refs, @para.ref_id), do: "opacity: 1", else: ""}
+          />
+          <span class="font-mono text-xs text-base-content/30">{@para.ref_id}</span>
+          <%!-- Speaker slider --%>
+          <div class="inline-flex items-center bg-base-300 rounded-full overflow-hidden">
+            <button
+              phx-click="set_speaker"
+              phx-value-ref-id={@para.ref_id}
+              phx-value-speaker=""
+              class={"px-1.5 py-0.5 text-xs leading-none transition-colors cursor-pointer #{if is_nil(@para.speaker), do: "bg-base-content/10 font-semibold text-base-content", else: "text-base-content/30 hover:text-base-content/60"}"}
+              title="Clear speaker"
+            >&times;</button>
+            <%= for speaker <- @speakers do %>
+              <button
+                phx-click="set_speaker"
+                phx-value-ref-id={@para.ref_id}
+                phx-value-speaker={speaker}
+                class={"px-1.5 py-0.5 text-xs leading-none transition-colors cursor-pointer whitespace-nowrap #{if @para.speaker == speaker, do: "bg-primary text-primary-content font-semibold rounded-full", else: "text-base-content/40 hover:text-base-content/70"}"}
+                title={speaker}
+              >{if @para.speaker == speaker, do: speaker, else: Map.get(@speaker_abbrevs, speaker, String.first(speaker))}</button>
+            <% end %>
+          </div>
+          <div class="flex-1"></div>
+          <div class="hidden group-hover:flex gap-1 shrink-0">
+            <button phx-click="delete_paragraph" phx-value-ref-id={@para.ref_id} class="btn btn-ghost btn-sm px-2 text-error" title="Delete" data-confirm="Delete this paragraph?">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-4 h-4"><path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clip-rule="evenodd"/></svg>
+            </button>
+          </div>
+        </div>
+        <%!-- Line 2: text content or inline edit --%>
+        <%= if @editing_paragraph == @para.ref_id do %>
+          <form phx-submit="save_paragraph" class="mt-1">
+            <input type="hidden" name="ref_id" value={@para.ref_id} />
+            <div class="flex gap-2 mb-1">
+              <input type="text" name="speaker" value={@para.speaker || ""} placeholder="Speaker" class="input input-bordered input-xs w-32" list={"speakers-#{@para.ref_id}"} />
+              <datalist id={"speakers-#{@para.ref_id}"}>
+                <%= for speaker <- @speakers do %>
+                  <option value={speaker}></option>
+                <% end %>
+              </datalist>
+            </div>
+            <textarea
+              name="text"
+              rows={max(3, div(String.length(@para.text), 80) + 1)}
+              class="textarea textarea-bordered w-full text-sm mb-1"
+              autofocus
+            >{@para.text}</textarea>
+            <div class="flex gap-1 justify-end">
+              <button type="button" phx-click="cancel_edit" class="btn btn-ghost btn-xs">Cancel</button>
+              <button type="submit" class="btn btn-primary btn-xs">Save</button>
+            </div>
+          </form>
+        <% else %>
+          <p
+            class="text-sm cursor-pointer hover:text-primary/80 transition-colors"
+            phx-click="edit_paragraph"
+            phx-value-ref-id={@para.ref_id}
+          >{@para.text}</p>
+        <% end %>
+      </div>
+    </div>
+    """
+  end
 
   @impl true
   def render(assigns) do
     chapter = get_chapter(assigns.book, assigns.selected_chapter)
     changes = compute_changes(assigns.saved_book, assigns.book)
+
+    abbrevs = speaker_abbreviations(assigns.speakers)
+
+    vet_stats = vetting_stats(assigns.book)
 
     assigns =
       assigns
@@ -616,6 +1291,8 @@ defmodule IngestWeb.EditorLive do
       |> assign(:changes, changes)
       |> assign(:para_json, focused_paragraph_json(assigns.book, assigns.focused_ref))
       |> assign(:ch_json, if(chapter, do: focused_chapter_json(chapter), else: nil))
+      |> assign(:speaker_abbrevs, abbrevs)
+      |> assign(:vet_stats, vet_stats)
 
     ~H"""
     <IngestWeb.Layouts.app flash={@flash} container_class="mx-auto max-w-[96rem]">
@@ -634,6 +1311,14 @@ defmodule IngestWeb.EditorLive do
             <% end %>
             <button phx-click="save_to_disk" class={"btn btn-sm #{if @dirty, do: "btn-warning", else: "btn-ghost"}"}>
               Save
+            </button>
+            <button phx-click="sync" class={"btn btn-sm #{if @synced or @dirty, do: "btn-ghost btn-disabled", else: "btn-info"}"} disabled={@dirty or @synced} title={cond do
+              @dirty -> "Save first before syncing"
+              @synced -> "All commits pushed"
+              true -> "Push commits to origin"
+            end}>
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-4 h-4"><path d="M5.22 14.78a.75.75 0 0 0 1.06-1.06L4.56 12h8.69a.75.75 0 0 0 0-1.5H4.56l1.72-1.72a.75.75 0 0 0-1.06-1.06l-3 3a.75.75 0 0 0 0 1.06l3 3ZM10.78 1.22a.75.75 0 0 0-1.06 1.06L11.44 4H2.75a.75.75 0 0 0 0 1.5h8.69l-1.72 1.72a.75.75 0 1 0 1.06 1.06l3-3a.75.75 0 0 0 0-1.06l-3-3Z"/></svg>
+              Sync
             </button>
             <.link navigate={~p"/"} class="btn btn-ghost btn-sm">Back</.link>
           </div>
@@ -703,7 +1388,7 @@ defmodule IngestWeb.EditorLive do
                         >
                           <span class="text-base-content/30 font-mono text-xs w-5 text-right shrink-0">{ch.n}</span>
                           <span class="truncate flex-1">{ch.title}</span>
-                          <span class="text-base-content/30 text-xs">{length(ch.paragraphs)}</span>
+                          <span class="text-base-content/30 text-xs">{Chapter.paragraph_count(ch)}</span>
                         </button>
                         <button
                           phx-click="edit_chapter_title"
@@ -742,7 +1427,12 @@ defmodule IngestWeb.EditorLive do
                     title="Click to rename"
                   >{@chapter.title}</h2>
                 <% end %>
-                <span class="text-base-content/30 text-xs">{length(@chapter.paragraphs)}p</span>
+                <span class="text-base-content/30 text-xs">
+                  {Chapter.paragraph_count(@chapter)}p
+                  <%= if Chapter.has_sections?(@chapter) do %>
+                    · {length(@chapter.sections)}s
+                  <% end %>
+                </span>
                 <%= if @chapter.n > 1 do %>
                   <button
                     phx-click="remove_chapter_break"
@@ -755,12 +1445,85 @@ defmodule IngestWeb.EditorLive do
 
               <%!-- Paragraph list with scroll spy --%>
               <div id="paragraph-list" phx-hook="ScrollSpy" class="space-y-0">
-                <div class="flex items-center justify-end mb-1">
+                <div class="flex items-center justify-end mb-1 gap-2">
                   <button phx-click="select_all_chapter" class="btn btn-ghost btn-xs text-base-content/40">Select all</button>
+                  <%= if Chapter.has_sections?(@chapter) do %>
+                    <button
+                      phx-click="remove_all_section_breaks"
+                      phx-value-chapter={@chapter.n}
+                      class="btn btn-ghost btn-xs text-base-content/40"
+                      data-confirm="Remove all section breaks in this chapter?"
+                    >Flatten sections</button>
+                  <% end %>
                 </div>
 
-                <%= for {para, idx} <- Enum.with_index(@chapter.paragraphs) do %>
-                  <%!-- Between-paragraph zone: glue + chapter break --%>
+                <%!-- Render paragraphs: section-aware --%>
+                <%= if Chapter.has_sections?(@chapter) do %>
+                  <%= for {section, s_idx} <- Enum.with_index(@chapter.sections) do %>
+                    <%!-- Section header --%>
+                    <div class={"flex items-center gap-2 py-2 px-2 border-b border-secondary/30 #{if s_idx > 0, do: "mt-3 border-t border-t-secondary/30 pt-3", else: ""}"}>
+                      <span class="text-secondary font-mono text-xs font-bold">§{section.n}</span>
+                      <%= if @editing_section == {@chapter.n, section.n} do %>
+                        <form phx-submit="rename_section" class="flex items-center gap-1 flex-1">
+                          <input type="hidden" name="chapter" value={@chapter.n} />
+                          <input type="hidden" name="section" value={section.n} />
+                          <input type="text" name="title" value={section.title} class="input input-bordered input-xs flex-1" autofocus />
+                          <button type="submit" class="btn btn-primary btn-xs">Save</button>
+                          <button type="button" phx-click="cancel_edit_section" class="btn btn-ghost btn-xs">Cancel</button>
+                        </form>
+                      <% else %>
+                        <span
+                          class="text-sm font-medium flex-1 cursor-pointer hover:text-secondary transition-colors"
+                          phx-click="edit_section_title"
+                          phx-value-chapter={@chapter.n}
+                          phx-value-section={section.n}
+                          title="Click to rename"
+                        >{section.title}</span>
+                      <% end %>
+                      <span class="text-base-content/30 text-xs">{length(section.paragraphs)}p</span>
+                      <%= if section.n > 1 do %>
+                        <button
+                          phx-click="remove_section_break"
+                          phx-value-chapter={@chapter.n}
+                          phx-value-section={section.n}
+                          class="btn btn-ghost btn-xs text-base-content/40 hover:text-warning"
+                          title="Remove this section break (merge with previous)"
+                        >Merge up</button>
+                      <% end %>
+                    </div>
+
+                    <%= for {para, idx} <- Enum.with_index(section.paragraphs) do %>
+                      <%!-- Between-paragraph zone --%>
+                      <%= if idx > 0 do %>
+                        <div class="group relative h-3 cursor-pointer hover:h-10 transition-all duration-150 flex items-center justify-center">
+                          <div class="hidden group-hover:flex items-center gap-3 absolute inset-x-0 top-0 bottom-0 rounded justify-center">
+                            <button
+                              phx-click="glue_paragraphs"
+                              phx-value-ref-id={para.ref_id}
+                              class="btn btn-ghost btn-xs text-success border-dashed border-success/30 bg-success/10 hover:bg-success/20"
+                              title="Merge with paragraph above"
+                            >Glue</button>
+                            <button
+                              phx-click="insert_section_break"
+                              phx-value-ref-id={para.ref_id}
+                              class="btn btn-ghost btn-xs text-secondary border-dashed border-secondary/30 bg-secondary/10 hover:bg-secondary/20"
+                            >+ Section break</button>
+                            <button
+                              phx-click="insert_chapter_break"
+                              phx-value-ref-id={para.ref_id}
+                              class="btn btn-ghost btn-xs text-info border-dashed border-info/30 bg-info/10 hover:bg-info/20"
+                            >+ Chapter break</button>
+                          </div>
+                        </div>
+                      <% end %>
+
+                      {render_paragraph(assigns, para)}
+                    <% end %>
+                  <% end %>
+                <% else %>
+
+                <%= for {para, idx} <- Enum.with_index(Chapter.all_paragraphs(@chapter)) do %>
+                  <%!-- Between-paragraph zone: glue + section break + chapter break --%>
                   <%= if idx > 0 do %>
                     <div class="group relative h-3 cursor-pointer hover:h-10 transition-all duration-150 flex items-center justify-center">
                       <div class="hidden group-hover:flex items-center gap-3 absolute inset-x-0 top-0 bottom-0 rounded justify-center">
@@ -771,6 +1534,11 @@ defmodule IngestWeb.EditorLive do
                           title="Merge with paragraph above"
                         >Glue</button>
                         <button
+                          phx-click="insert_section_break"
+                          phx-value-ref-id={para.ref_id}
+                          class="btn btn-ghost btn-xs text-secondary border-dashed border-secondary/30 bg-secondary/10 hover:bg-secondary/20"
+                        >+ Section break</button>
+                        <button
                           phx-click="insert_chapter_break"
                           phx-value-ref-id={para.ref_id}
                           class="btn btn-ghost btn-xs text-info border-dashed border-info/30 bg-info/10 hover:bg-info/20"
@@ -779,91 +1547,8 @@ defmodule IngestWeb.EditorLive do
                     </div>
                   <% end %>
 
-                  <%!-- Paragraph --%>
-                  <%= if @editing_paragraph == para.ref_id do %>
-                    <div class="bg-base-200 rounded-lg p-3 my-1" data-ref-id={para.ref_id}>
-                      <form phx-submit="save_paragraph">
-                        <input type="hidden" name="ref_id" value={para.ref_id} />
-                        <div class="flex gap-2 mb-2">
-                          <div class="form-control flex-1">
-                            <label class="label py-0"><span class="label-text text-xs">Speaker</span></label>
-                            <input type="text" name="speaker" value={para.speaker || ""} placeholder="(none)" class="input input-bordered input-sm" />
-                          </div>
-                          <div class="form-control">
-                            <label class="label py-0"><span class="label-text text-xs">Ref</span></label>
-                            <span class="font-mono text-xs pt-2 text-base-content/40">{para.ref_id}</span>
-                          </div>
-                        </div>
-                        <textarea
-                          name="text"
-                          rows={max(3, div(String.length(para.text), 80) + 1)}
-                          class="textarea textarea-bordered w-full text-sm mb-2"
-                        >{para.text}</textarea>
-                        <div class="flex gap-1 justify-end">
-                          <button type="button" phx-click="cancel_edit" class="btn btn-ghost btn-xs">Cancel</button>
-                          <button type="submit" class="btn btn-primary btn-xs">Save</button>
-                        </div>
-                      </form>
-                    </div>
-                  <% else %>
-                    <div
-                      data-ref-id={para.ref_id}
-                      class={"group py-1.5 px-2 rounded transition-colors #{cond do
-                        MapSet.member?(@selected_refs, para.ref_id) -> "bg-primary/5 ring-1 ring-primary/20"
-                        @focused_ref == para.ref_id -> "bg-base-200"
-                        true -> "hover:bg-base-200/50"
-                      end}"}
-                    >
-                      <%!-- Line 1: metadata + actions --%>
-                      <div class="flex items-center gap-2 mb-0.5">
-                        <input
-                          type="checkbox"
-                          class="checkbox checkbox-xs checkbox-primary opacity-0 group-hover:opacity-100 transition-opacity"
-                          checked={MapSet.member?(@selected_refs, para.ref_id)}
-                          phx-click="toggle_select"
-                          phx-value-ref-id={para.ref_id}
-                          style={if MapSet.member?(@selected_refs, para.ref_id), do: "opacity: 1", else: ""}
-                        />
-                        <span class="font-mono text-xs text-base-content/30">{para.ref_id}</span>
-                        <%!-- Speaker badge --%>
-                        <%= if para.speaker do %>
-                          <span class="badge badge-xs badge-outline">{para.speaker}</span>
-                        <% else %>
-                          <span class="badge badge-xs badge-ghost text-base-content/20">--</span>
-                        <% end %>
-                        <%!-- Speaker chips on hover --%>
-                        <div class="hidden group-hover:flex gap-0.5">
-                          <%= for speaker <- @speakers do %>
-                            <button
-                              phx-click="set_speaker"
-                              phx-value-ref-id={para.ref_id}
-                              phx-value-speaker={speaker}
-                              class={"btn btn-xs px-1.5 min-h-0 h-5 #{if para.speaker == speaker, do: "btn-primary", else: "btn-ghost text-base-content/50"}"}
-                              title={speaker}
-                            >{speaker_initials(speaker)}</button>
-                          <% end %>
-                          <button
-                            phx-click="set_speaker"
-                            phx-value-ref-id={para.ref_id}
-                            phx-value-speaker=""
-                            class={"btn btn-xs px-1.5 min-h-0 h-5 #{if is_nil(para.speaker), do: "btn-primary", else: "btn-ghost text-base-content/30"}"}
-                            title="Clear speaker"
-                          >&times;</button>
-                        </div>
-                        <div class="flex-1"></div>
-                        <div class="hidden group-hover:flex gap-1 shrink-0">
-                          <button phx-click="edit_paragraph" phx-value-ref-id={para.ref_id} class="btn btn-ghost btn-sm px-2" title="Edit">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-4 h-4"><path d="M13.488 2.513a1.75 1.75 0 0 0-2.475 0L6.05 7.475a.75.75 0 0 0-.186.312l-.9 3.15a.75.75 0 0 0 .926.926l3.15-.9a.75.75 0 0 0 .312-.186l4.963-4.963a1.75 1.75 0 0 0 0-2.475l-.827-.826ZM11.72 3.22a.25.25 0 0 1 .354 0l.826.826a.25.25 0 0 1 0 .354L8.55 8.75l-1.186.339.338-1.186L11.72 3.22Z"/></svg>
-                          </button>
-                          <button phx-click="delete_paragraph" phx-value-ref-id={para.ref_id} class="btn btn-ghost btn-sm px-2 text-error" title="Delete" data-confirm="Delete this paragraph?">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-4 h-4"><path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clip-rule="evenodd"/></svg>
-                          </button>
-                        </div>
-                      </div>
-                      <%!-- Line 2: text content --%>
-                      <p class="text-sm pl-6">{para.text}</p>
-                    </div>
-                  <% end %>
+                  {render_paragraph(assigns, para)}
+                <% end %>
                 <% end %>
               </div>
 
@@ -886,6 +1571,67 @@ defmodule IngestWeb.EditorLive do
           <%!-- Right: JSON preview + diff --%>
           <div class="w-80 shrink-0 hidden xl:block">
             <div class="sticky top-2 space-y-3">
+              <%!-- Book metadata --%>
+              <div>
+                <button phx-click="toggle_metadata" class="flex items-center gap-1 w-full text-left">
+                  <h4 class="font-semibold text-xs text-base-content/50 uppercase tracking-wide">Metadata</h4>
+                  <span class="text-base-content/30 text-xs ml-auto">{if @editing_metadata, do: "Close", else: "Edit"}</span>
+                </button>
+                <%= if @editing_metadata do %>
+                  <form phx-submit="save_metadata" class="mt-2 space-y-2">
+                    <div class="form-control">
+                      <label class="label py-0"><span class="label-text text-xs">Title</span></label>
+                      <input type="text" name="title" value={Map.get(@book.titles, @book.primary_lang || "en", "")} class="input input-bordered input-xs w-full" />
+                    </div>
+                    <div class="grid grid-cols-2 gap-2">
+                      <div class="form-control">
+                        <label class="label py-0"><span class="label-text text-xs">Slug</span></label>
+                        <input type="text" name="slug" value={@book.slug} class="input input-bordered input-xs w-full font-mono" />
+                      </div>
+                      <div class="form-control">
+                        <label class="label py-0"><span class="label-text text-xs">Code</span></label>
+                        <input type="text" name="code" value={@book.code} class="input input-bordered input-xs w-full font-mono" />
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2">
+                      <div class="form-control">
+                        <label class="label py-0"><span class="label-text text-xs">Language</span></label>
+                        <input type="text" name="primary_lang" value={@book.primary_lang} class="input input-bordered input-xs w-full font-mono" placeholder="en" />
+                      </div>
+                      <div class="form-control">
+                        <label class="label py-0"><span class="label-text text-xs">Year</span></label>
+                        <input type="text" name="publication_year" value={@book.publication_year || ""} class="input input-bordered input-xs w-full font-mono" placeholder="1974" />
+                      </div>
+                    </div>
+                    <div class="flex gap-1 justify-end">
+                      <button type="button" phx-click="toggle_metadata" class="btn btn-ghost btn-xs">Cancel</button>
+                      <button type="submit" class="btn btn-primary btn-xs">Apply</button>
+                    </div>
+                  </form>
+                <% else %>
+                  <div class="mt-1 text-xs space-y-0.5">
+                    <div class="flex justify-between">
+                      <span class="text-base-content/40">Title</span>
+                      <span class="font-medium truncate ml-2">{Map.get(@book.titles, @book.primary_lang || "en", "--")}</span>
+                    </div>
+                    <div class="flex justify-between">
+                      <span class="text-base-content/40">Code</span>
+                      <span class="font-mono">{@book.code || "--"}</span>
+                    </div>
+                    <div class="flex justify-between">
+                      <span class="text-base-content/40">Lang</span>
+                      <span class="font-mono">{@book.primary_lang || "--"}</span>
+                    </div>
+                    <%= if @book.publication_year do %>
+                      <div class="flex justify-between">
+                        <span class="text-base-content/40">Year</span>
+                        <span>{@book.publication_year}</span>
+                      </div>
+                    <% end %>
+                  </div>
+                <% end %>
+              </div>
+
               <%!-- Change summary --%>
               <%= if @changes.has_changes do %>
                 <div class="bg-warning/10 border border-warning/20 rounded-lg p-3">
@@ -937,6 +1683,56 @@ defmodule IngestWeb.EditorLive do
                 </div>
               <% end %>
 
+              <%!-- Structure: chapters + sections with delete --%>
+              <div>
+                <h4 class="font-semibold text-xs text-base-content/50 uppercase tracking-wide mb-1">Structure</h4>
+                <ul class="space-y-0.5 text-xs max-h-48 overflow-y-auto">
+                  <%= for ch <- @book.chapters do %>
+                    <li>
+                      <div class={"group/ch flex items-center gap-1 px-1.5 py-1 rounded #{if ch.n == @selected_chapter, do: "bg-base-200", else: "hover:bg-base-200/50"}"}>
+                        <button phx-click="select_chapter" phx-value-chapter={ch.n} class="flex items-center gap-1 flex-1 text-left min-w-0">
+                          <span class="font-mono text-base-content/30 w-4 text-right shrink-0">{ch.n}</span>
+                          <span class="truncate">{ch.title}</span>
+                        </button>
+                        <span class="text-base-content/20 shrink-0">{Chapter.paragraph_count(ch)}</span>
+                        <%= if length(@book.chapters) > 1 do %>
+                          <button
+                            phx-click="delete_chapter"
+                            phx-value-chapter={ch.n}
+                            class="hidden group-hover/ch:block shrink-0 text-base-content/20 hover:text-error transition-colors"
+                            data-confirm={"Delete chapter #{ch.n} \"#{ch.title}\" and all its paragraphs?"}
+                            title="Delete chapter"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5"><path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clip-rule="evenodd"/></svg>
+                          </button>
+                        <% end %>
+                      </div>
+                      <%= if ch.n == @selected_chapter and Chapter.has_sections?(ch) do %>
+                        <ul class="ml-5 space-y-0.5 mt-0.5">
+                          <%= for section <- ch.sections do %>
+                            <li class="group/sec flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-base-200/50">
+                              <span class="text-secondary font-mono shrink-0">§{section.n}</span>
+                              <span class="truncate flex-1 text-base-content/60">{section.title}</span>
+                              <span class="text-base-content/20 shrink-0">{length(section.paragraphs)}</span>
+                              <button
+                                phx-click="delete_section"
+                                phx-value-chapter={ch.n}
+                                phx-value-section={section.n}
+                                class="hidden group-hover/sec:block shrink-0 text-base-content/20 hover:text-error transition-colors"
+                                data-confirm={"Delete section §#{section.n} \"#{section.title}\" and all its paragraphs?"}
+                                title="Delete section"
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5"><path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clip-rule="evenodd"/></svg>
+                              </button>
+                            </li>
+                          <% end %>
+                        </ul>
+                      <% end %>
+                    </li>
+                  <% end %>
+                </ul>
+              </div>
+
               <%!-- Speakers --%>
               <div>
                 <h4 class="font-semibold text-xs text-base-content/50 uppercase tracking-wide mb-1">Speakers</h4>
@@ -957,6 +1753,18 @@ defmodule IngestWeb.EditorLive do
                   <input type="text" name="speaker" placeholder="Add speaker..." class="input input-bordered input-xs flex-1" />
                   <button type="submit" class="btn btn-ghost btn-xs">Add</button>
                 </form>
+              </div>
+
+              <%!-- Vetting progress --%>
+              <div>
+                <h4 class="font-semibold text-xs text-base-content/50 uppercase tracking-wide mb-1">Vetting</h4>
+                <div class="flex items-center gap-2 text-xs">
+                  <progress class="progress progress-success flex-1" value={@vet_stats.vetted} max={@vet_stats.total}></progress>
+                  <span class="text-base-content/60 whitespace-nowrap">{@vet_stats.vetted}/{@vet_stats.total} ({@vet_stats.pct}%)</span>
+                </div>
+                <%= if @vet_stats.skipped > 0 do %>
+                  <p class="text-xs text-warning/70 mt-0.5">{@vet_stats.skipped} skipped</p>
+                <% end %>
               </div>
 
               <%!-- Chapter JSON --%>
@@ -983,6 +1791,7 @@ defmodule IngestWeb.EditorLive do
           </div>
         </div>
       </div>
+
     </IngestWeb.Layouts.app>
     """
   end

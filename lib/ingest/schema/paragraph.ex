@@ -17,11 +17,12 @@ defmodule Ingest.Schema.Paragraph do
           text: String.t(),
           i18n: %{String.t() => String.t()},
           ref_id: String.t(),
-          confidence: float()
+          confidence: float(),
+          vetted: false | true | :skipped
         }
 
   @derive Jason.Encoder
-  defstruct [:n, :speaker, :text, :ref_id, i18n: %{}, confidence: 1.0]
+  defstruct [:n, :speaker, :text, :ref_id, i18n: %{}, confidence: 1.0, vetted: false]
 
   @doc """
   Creates a new paragraph with initialized i18n slots.
@@ -51,7 +52,11 @@ defmodule Ingest.Schema.Paragraph do
       "speaker" => p.speaker,
       "text" => p.text,
       "i18n" => p.i18n,
-      "refId" => p.ref_id
+      "refId" => p.ref_id,
+      "_vetted" => case p.vetted do
+        :skipped -> "skipped"
+        other -> other
+      end
     }
 
     map

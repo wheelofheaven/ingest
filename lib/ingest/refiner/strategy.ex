@@ -64,7 +64,7 @@ defmodule Ingest.Refiner.Strategy do
   Returns statistics about how many paragraphs need refinement.
   """
   def refinement_stats(%Book{} = book, threshold \\ 0.7) do
-    all_paragraphs = Enum.flat_map(book.chapters, & &1.paragraphs)
+    all_paragraphs = Enum.flat_map(book.chapters, &Ingest.Schema.Chapter.all_paragraphs/1)
     total = length(all_paragraphs)
     ambiguous = Enum.count(all_paragraphs, &needs_refinement?(&1, threshold))
 
@@ -78,7 +78,7 @@ defmodule Ingest.Refiner.Strategy do
 
   defp extract_known_speakers(%Book{} = book) do
     book.chapters
-    |> Enum.flat_map(& &1.paragraphs)
+    |> Enum.flat_map(&Ingest.Schema.Chapter.all_paragraphs/1)
     |> Enum.map(& &1.speaker)
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()

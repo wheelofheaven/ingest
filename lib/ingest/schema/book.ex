@@ -56,14 +56,33 @@ defmodule Ingest.Schema.Book do
       |> Enum.map(fn {chapter, ch_idx} ->
         chapter = %{chapter | n: ch_idx, ref_id: "#{code}-#{ch_idx}"}
 
-        paragraphs =
-          chapter.paragraphs
-          |> Enum.with_index(1)
-          |> Enum.map(fn {para, p_idx} ->
-            %{para | n: p_idx, ref_id: "#{code}-#{ch_idx}:#{p_idx}"}
-          end)
+        if Chapter.has_sections?(chapter) do
+          {sections, _counter} =
+            chapter.sections
+            |> Enum.with_index(1)
+            |> Enum.map_reduce(1, fn {section, s_idx}, p_counter ->
+              section = %{section | n: s_idx}
 
-        %{chapter | paragraphs: paragraphs}
+              {paragraphs, next_counter} =
+                section.paragraphs
+                |> Enum.map_reduce(p_counter, fn para, p_idx ->
+                  {%{para | n: p_idx, ref_id: "#{code}-#{ch_idx}:#{p_idx}"}, p_idx + 1}
+                end)
+
+              {%{section | paragraphs: paragraphs}, next_counter}
+            end)
+
+          %{chapter | sections: sections, paragraphs: []}
+        else
+          paragraphs =
+            chapter.paragraphs
+            |> Enum.with_index(1)
+            |> Enum.map(fn {para, p_idx} ->
+              %{para | n: p_idx, ref_id: "#{code}-#{ch_idx}:#{p_idx}"}
+            end)
+
+          %{chapter | paragraphs: paragraphs}
+        end
       end)
 
     %{book | chapters: chapters}
@@ -101,7 +120,7 @@ defmodule Ingest.Schema.Book do
       "primaryLang" => b.primary_lang,
       "titles" => b.titles,
       "publicationYear" => b.publication_year,
-      "schema" => ["book", "chapters", "paragraphs"],
+      "schema" => schema_list(b),
       "revision" => b.revision,
       "updated" => b.updated,
       "chapters" => Enum.map(b.chapters, &Chapter.to_json/1),
@@ -109,5 +128,15 @@ defmodule Ingest.Schema.Book do
       "paragraphCount" => paragraph_count(b),
       "chapterCount" => chapter_count(b)
     }
+  end
+
+  defp schema_list(%__MODULE__{chapters: chapters}) do
+    has_sections = Enum.any?(chapters, &Chapter.has_sections?/1)
+
+    if has_sections do
+      ["book", "chapters", "sections", "paragraphs"]
+    else
+      ["book", "chapters", "paragraphs"]
+    end
   end
 end

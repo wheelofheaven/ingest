@@ -67,6 +67,8 @@ defmodule Ingest.Stages.Export do
   defp load_translations(error, _slug), do: error
 
   defp apply_translations_to_book(book, translated_json) do
+    alias Ingest.Schema.Chapter
+
     translated_chapters = translated_json["chapters"] || []
 
     chapters =
@@ -74,13 +76,33 @@ defmodule Ingest.Stages.Export do
       |> Enum.map(fn {chapter, t_ch} ->
         i18n = t_ch["i18n"] || %{}
 
-        paragraphs =
-          Enum.zip(chapter.paragraphs, t_ch["paragraphs"] || [])
-          |> Enum.map(fn {para, t_p} ->
-            %{para | i18n: t_p["i18n"] || para.i18n}
-          end)
+        if Chapter.has_sections?(chapter) do
+          t_sections = t_ch["sections"] || []
 
-        %{chapter | i18n: i18n, paragraphs: paragraphs}
+          sections =
+            Enum.zip(chapter.sections, t_sections)
+            |> Enum.map(fn {section, t_s} ->
+              s_i18n = t_s["i18n"] || %{}
+
+              paragraphs =
+                Enum.zip(section.paragraphs, t_s["paragraphs"] || [])
+                |> Enum.map(fn {para, t_p} ->
+                  %{para | i18n: t_p["i18n"] || para.i18n}
+                end)
+
+              %{section | i18n: s_i18n, paragraphs: paragraphs}
+            end)
+
+          %{chapter | i18n: i18n, sections: sections}
+        else
+          paragraphs =
+            Enum.zip(chapter.paragraphs, t_ch["paragraphs"] || [])
+            |> Enum.map(fn {para, t_p} ->
+              %{para | i18n: t_p["i18n"] || para.i18n}
+            end)
+
+          %{chapter | i18n: i18n, paragraphs: paragraphs}
+        end
       end)
 
     %{book | chapters: chapters}

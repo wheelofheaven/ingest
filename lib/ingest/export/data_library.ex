@@ -35,7 +35,7 @@ defmodule Ingest.Export.DataLibrary do
       |> Book.assign_ref_ids()
       |> Book.init_i18n(languages)
 
-    json = Book.to_json(book)
+    json = Book.to_json(book) |> strip_internal_keys()
 
     case Validator.validate_book(json) do
       {:ok, _} ->
@@ -67,7 +67,20 @@ defmodule Ingest.Export.DataLibrary do
       |> Book.assign_ref_ids()
       |> Book.init_i18n(languages)
       |> Book.to_json()
+      |> strip_internal_keys()
 
     {:ok, json}
   end
+
+  defp strip_internal_keys(map) when is_map(map) do
+    map
+    |> Enum.reject(fn {key, _} -> is_binary(key) and String.starts_with?(key, "_") end)
+    |> Map.new(fn {key, val} -> {key, strip_internal_keys(val)} end)
+  end
+
+  defp strip_internal_keys(list) when is_list(list) do
+    Enum.map(list, &strip_internal_keys/1)
+  end
+
+  defp strip_internal_keys(value), do: value
 end
