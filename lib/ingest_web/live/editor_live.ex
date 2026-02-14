@@ -84,11 +84,15 @@ defmodule IngestWeb.EditorLive do
     {:noreply, assign(socket, :editing_paragraph, nil)}
   end
 
-  def handle_event("save_paragraph", %{"ref_id" => ref_id, "text" => text, "speaker" => speaker}, socket) do
-    speaker = if speaker == "", do: nil, else: speaker
-
+  def handle_event("save_paragraph", %{"ref_id" => ref_id, "text" => text} = params, socket) do
     book = update_paragraph(socket.assigns.book, ref_id, fn para ->
-      %{para | text: String.trim(text), speaker: speaker, confidence: 1.0}
+      para = %{para | text: String.trim(text), confidence: 1.0}
+
+      case params do
+        %{"speaker" => ""} -> %{para | speaker: nil}
+        %{"speaker" => speaker} -> %{para | speaker: speaker}
+        _ -> para
+      end
     end)
 
     {:noreply,
@@ -1240,36 +1244,16 @@ defmodule IngestWeb.EditorLive do
             </button>
           </div>
         </div>
-        <%!-- Line 2: text content or inline edit --%>
-        <%= if @editing_paragraph == @para.ref_id do %>
-          <form phx-submit="save_paragraph" class="mt-1">
-            <input type="hidden" name="ref_id" value={@para.ref_id} />
-            <div class="flex gap-2 mb-1">
-              <input type="text" name="speaker" value={@para.speaker || ""} placeholder="Speaker" class="input input-bordered input-xs w-32" list={"speakers-#{@para.ref_id}"} />
-              <datalist id={"speakers-#{@para.ref_id}"}>
-                <%= for speaker <- @speakers do %>
-                  <option value={speaker}></option>
-                <% end %>
-              </datalist>
-            </div>
-            <textarea
-              name="text"
-              rows={max(3, div(String.length(@para.text), 80) + 1)}
-              class="textarea textarea-bordered w-full text-sm mb-1"
-              autofocus
-            >{@para.text}</textarea>
-            <div class="flex gap-1 justify-end">
-              <button type="button" phx-click="cancel_edit" class="btn btn-ghost btn-xs">Cancel</button>
-              <button type="submit" class="btn btn-primary btn-xs">Save</button>
-            </div>
-          </form>
-        <% else %>
-          <p
-            class="text-sm cursor-pointer hover:text-primary/80 transition-colors"
-            phx-click="edit_paragraph"
-            phx-value-ref-id={@para.ref_id}
-          >{@para.text}</p>
-        <% end %>
+        <%!-- Line 2: text content — becomes contenteditable when editing --%>
+        <p
+          id={"para-text-#{@para.ref_id}"}
+          phx-hook="ContentEditable"
+          data-ref-id={@para.ref_id}
+          data-editing={to_string(@editing_paragraph == @para.ref_id)}
+          phx-click="edit_paragraph"
+          phx-value-ref-id={@para.ref_id}
+          class={"text-sm transition-all outline-none #{if @editing_paragraph == @para.ref_id, do: "bg-base-200 ring-1 ring-primary/30 rounded px-2 py-1 -mx-2", else: "cursor-pointer hover:text-primary/80"}"}
+        >{@para.text}</p>
       </div>
     </div>
     """

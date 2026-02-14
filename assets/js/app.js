@@ -97,7 +97,73 @@ const ScrollSpy = {
   }
 }
 
-const Hooks = {...colocatedHooks, ScrollSpy}
+const ContentEditable = {
+  mounted() {
+    this._handleBlur = () => this.save()
+    this._handleKeydown = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault()
+        this.cancel()
+      }
+    }
+  },
+
+  updated() {
+    const editing = this.el.dataset.editing === "true"
+    if (editing && !this.el.isContentEditable) {
+      this.activate()
+    } else if (!editing && this.el.isContentEditable) {
+      this.deactivate()
+    }
+  },
+
+  activate() {
+    this.originalText = this.el.innerText
+    this.el.contentEditable = "true"
+    this.el.focus()
+    // Place cursor at end
+    const range = document.createRange()
+    range.selectNodeContents(this.el)
+    range.collapse(false)
+    const sel = window.getSelection()
+    sel.removeAllRanges()
+    sel.addRange(range)
+
+    this.el.addEventListener("blur", this._handleBlur)
+    this.el.addEventListener("keydown", this._handleKeydown)
+  },
+
+  deactivate() {
+    this.el.contentEditable = "false"
+    this.el.removeEventListener("blur", this._handleBlur)
+    this.el.removeEventListener("keydown", this._handleKeydown)
+  },
+
+  save() {
+    const text = this.el.innerText.trim()
+    if (text !== this.originalText) {
+      this.pushEvent("save_paragraph", {
+        ref_id: this.el.dataset.refId,
+        text: text
+      })
+    } else {
+      this.pushEvent("cancel_edit", {})
+    }
+    this.deactivate()
+  },
+
+  cancel() {
+    this.el.innerText = this.originalText
+    this.deactivate()
+    this.pushEvent("cancel_edit", {})
+  },
+
+  destroyed() {
+    this.deactivate()
+  }
+}
+
+const Hooks = {...colocatedHooks, ScrollSpy, ContentEditable}
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
