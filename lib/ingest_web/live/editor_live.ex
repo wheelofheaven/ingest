@@ -295,11 +295,16 @@ defmodule IngestWeb.EditorLive do
     chapter_n = socket.assigns.selected_chapter
     book = split_chapter_at_paragraph(book, chapter_n, ref_id)
 
+    # The new chapter is chapter_n + 1 — switch to it and open title editing
+    new_chapter_n = chapter_n + 1
+
     {:noreply,
      socket
      |> assign(:book, book)
+     |> assign(:selected_chapter, new_chapter_n)
+     |> assign(:editing_chapter, new_chapter_n)
      |> assign(:dirty, true)
-     |> put_flash(:info, "Chapter break inserted")}
+     |> put_flash(:info, "Chapter break inserted — name your new chapter")}
   end
 
   # -- Chapter editing --
@@ -680,15 +685,36 @@ defmodule IngestWeb.EditorLive do
               <ul class="space-y-0.5">
                 <%= for ch <- @book.chapters do %>
                   <li>
-                    <button
-                      phx-click="select_chapter"
-                      phx-value-chapter={ch.n}
-                      class={"flex items-center gap-1.5 w-full text-left px-2 py-1 rounded text-sm hover:bg-base-200 transition-colors #{if @selected_chapter == ch.n, do: "bg-base-200 font-medium", else: ""}"}
-                    >
-                      <span class="text-base-content/30 font-mono text-xs w-5 text-right shrink-0">{ch.n}</span>
-                      <span class="truncate flex-1">{ch.title}</span>
-                      <span class="text-base-content/30 text-xs">{length(ch.paragraphs)}</span>
-                    </button>
+                    <%= if @editing_chapter == ch.n do %>
+                      <form phx-submit="rename_chapter" class="px-2 py-1">
+                        <input type="hidden" name="chapter" value={ch.n} />
+                        <input type="text" name="title" value={ch.title} class="input input-bordered input-xs w-full mb-1" autofocus />
+                        <div class="flex gap-1">
+                          <button type="submit" class="btn btn-primary btn-xs flex-1">Save</button>
+                          <button type="button" phx-click="cancel_edit_chapter" class="btn btn-ghost btn-xs">Cancel</button>
+                        </div>
+                      </form>
+                    <% else %>
+                      <div class="group flex items-center gap-1">
+                        <button
+                          phx-click="select_chapter"
+                          phx-value-chapter={ch.n}
+                          class={"flex items-center gap-1.5 flex-1 text-left px-2 py-1 rounded text-sm hover:bg-base-200 transition-colors #{if @selected_chapter == ch.n, do: "bg-base-200 font-medium", else: ""}"}
+                        >
+                          <span class="text-base-content/30 font-mono text-xs w-5 text-right shrink-0">{ch.n}</span>
+                          <span class="truncate flex-1">{ch.title}</span>
+                          <span class="text-base-content/30 text-xs">{length(ch.paragraphs)}</span>
+                        </button>
+                        <button
+                          phx-click="edit_chapter_title"
+                          phx-value-chapter={ch.n}
+                          class="hidden group-hover:block btn btn-ghost btn-xs px-1"
+                          title="Rename chapter"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3 h-3"><path d="M13.488 2.513a1.75 1.75 0 0 0-2.475 0L6.05 7.475a.75.75 0 0 0-.186.312l-.9 3.15a.75.75 0 0 0 .926.926l3.15-.9a.75.75 0 0 0 .312-.186l4.963-4.963a1.75 1.75 0 0 0 0-2.475l-.827-.826ZM11.72 3.22a.25.25 0 0 1 .354 0l.826.826a.25.25 0 0 1 0 .354L8.55 8.75l-1.186.339.338-1.186L11.72 3.22Z"/></svg>
+                        </button>
+                      </div>
+                    <% end %>
                   </li>
                 <% end %>
               </ul>
@@ -736,7 +762,7 @@ defmodule IngestWeb.EditorLive do
                 <%= for {para, idx} <- Enum.with_index(@chapter.paragraphs) do %>
                   <%!-- Between-paragraph zone: glue + chapter break --%>
                   <%= if idx > 0 do %>
-                    <div class="group relative h-1 -my-0.5 hover:h-8 transition-all duration-150 flex items-center justify-center">
+                    <div class="group relative h-3 cursor-pointer hover:h-10 transition-all duration-150 flex items-center justify-center">
                       <div class="hidden group-hover:flex items-center gap-3 absolute inset-x-0 top-0 bottom-0 rounded justify-center">
                         <button
                           phx-click="glue_paragraphs"
