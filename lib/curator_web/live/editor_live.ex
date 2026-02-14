@@ -27,6 +27,7 @@ defmodule CuratorWeb.EditorLive do
          |> assign(:editing_metadata, false)
          |> assign(:focused_ref, nil)
          |> assign(:selected_refs, MapSet.new())
+         |> assign(:last_selected_ref, nil)
          |> assign(:repeated_patterns, repeated)
          |> assign(:show_patterns, false)
          |> assign(:dirty, false)
@@ -116,15 +117,31 @@ defmodule CuratorWeb.EditorLive do
 
   # -- Multi-select --
 
-  def handle_event("toggle_select", %{"ref-id" => ref_id}, socket) do
+  def handle_event("toggle_select", %{"ref-id" => ref_id} = params, socket) do
     selected = socket.assigns.selected_refs
+    shift = params["shift"] == true
+    deselecting = MapSet.member?(selected, ref_id)
 
     selected =
-      if MapSet.member?(selected, ref_id),
-        do: MapSet.delete(selected, ref_id),
-        else: MapSet.put(selected, ref_id)
+      cond do
+        deselecting ->
+          MapSet.delete(selected, ref_id)
 
-    {:noreply, assign(socket, :selected_refs, selected)}
+        shift and socket.assigns.last_selected_ref != nil ->
+          chapter = get_chapter(socket.assigns.book, socket.assigns.selected_chapter)
+          range = refs_in_range(chapter, socket.assigns.last_selected_ref, ref_id)
+          Enum.reduce(range, selected, &MapSet.put(&2, &1))
+
+        true ->
+          MapSet.put(selected, ref_id)
+      end
+
+    last = if deselecting, do: nil, else: ref_id
+
+    {:noreply,
+     socket
+     |> assign(:selected_refs, selected)
+     |> assign(:last_selected_ref, last)}
   end
 
   def handle_event("select_all_chapter", _params, socket) do
@@ -558,7 +575,6 @@ defmodule CuratorWeb.EditorLive do
   def handle_event("save_to_disk", _params, socket) do
     book = socket.assigns.book
     slug = socket.assigns.slug
-    saved_book = socket.assigns.saved_book
     json = Book.to_json(book)
     encoded = Jason.encode!(json, pretty: true)
     {:ok, path} = WorkDir.write_artifact(slug, "book.json", encoded)
@@ -571,14 +587,11 @@ defmodule CuratorWeb.EditorLive do
       _ -> :ok
     end
 
-    # Git commit
-    commit_message = build_commit_message(slug, saved_book, book)
-
+    # Stage changes
     flash =
-      case Git.commit(slug, commit_message) do
-        {:ok, :no_changes} -> "Saved to #{path}"
-        {:ok, sha} -> "Saved to #{path} (commit #{sha})"
-        {:error, reason} -> "Saved to #{path} (git error: #{reason})"
+      case Git.stage(slug) do
+        :ok -> "Saved to #{path}"
+        {:error, reason} -> "Saved to #{path} (git add error: #{reason})"
       end
 
     {:noreply,
@@ -589,18 +602,43 @@ defmodule CuratorWeb.EditorLive do
      |> put_flash(:info, flash)}
   end
 
-  # -- Sync --
+  # -- Sync (commit + push) --
 
   def handle_event("sync", _params, socket) do
-    case Git.push() do
-      :ok ->
-        {:noreply,
-         socket
-         |> assign(:synced, true)
-         |> put_flash(:info, "Pushed to origin")}
+    slug = socket.assigns.slug
+    commit_message = build_commit_message(slug, socket.assigns.saved_book, socket.assigns.book)
+
+    case Git.commit(commit_message) do
+      {:ok, :no_changes} ->
+        # Nothing staged — try pushing any existing commits
+        case Git.push() do
+          :ok ->
+            {:noreply,
+             socket
+             |> assign(:synced, true)
+             |> put_flash(:info, "Pushed to origin")}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, "Push failed: #{reason}")}
+        end
+
+      {:ok, sha} ->
+        case Git.push() do
+          :ok ->
+            {:noreply,
+             socket
+             |> assign(:synced, true)
+             |> put_flash(:info, "Committed #{sha} and pushed")}
+
+          {:error, reason} ->
+            {:noreply,
+             socket
+             |> assign(:synced, false)
+             |> put_flash(:error, "Committed #{sha} but push failed: #{reason}")}
+        end
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Push failed: #{reason}")}
+        {:noreply, put_flash(socket, :error, "Commit failed: #{reason}")}
     end
   end
 
@@ -642,6 +680,22 @@ defmodule CuratorWeb.EditorLive do
 
   defp get_chapter(book, n) do
     Enum.find(book.chapters, &(&1.n == n))
+  end
+
+  defp refs_in_range(nil, _ref_a, _ref_b), do: []
+
+  defp refs_in_range(chapter, ref_a, ref_b) do
+    all_refs = Enum.map(Chapter.all_paragraphs(chapter), & &1.ref_id)
+    idx_a = Enum.find_index(all_refs, &(&1 == ref_a))
+    idx_b = Enum.find_index(all_refs, &(&1 == ref_b))
+
+    case {idx_a, idx_b} do
+      {nil, _} -> [ref_b]
+      {_, nil} -> [ref_a]
+      {a, b} ->
+        {lo, hi} = if a <= b, do: {a, b}, else: {b, a}
+        Enum.slice(all_refs, lo..hi)
+    end
   end
 
   defp find_paragraph(book, ref_id) do
@@ -1187,10 +1241,15 @@ defmodule CuratorWeb.EditorLive do
       <div class="w-7 shrink-0 flex items-center justify-center">
         <input
           type="checkbox"
-          class={"checkbox checkbox-primary rounded-full w-5 h-5 transition-opacity cursor-pointer #{if MapSet.member?(@selected_refs, @para.ref_id), do: "opacity-100", else: "opacity-0 group-hover:opacity-40 hover:!opacity-100"}"}
+          id={"select-#{@para.ref_id}"}
+          phx-hook="ShiftClick"
+          data-ref-id={@para.ref_id}
+          class={"checkbox checkbox-primary rounded-full w-5 h-5 transition-opacity cursor-pointer #{cond do
+            MapSet.member?(@selected_refs, @para.ref_id) -> "opacity-100"
+            @selected_count > 0 -> "opacity-40 hover:opacity-100"
+            true -> "opacity-0 group-hover:opacity-40 hover:!opacity-100"
+          end}"}
           checked={MapSet.member?(@selected_refs, @para.ref_id)}
-          phx-click="toggle_select"
-          phx-value-ref-id={@para.ref_id}
         />
       </div>
 
@@ -1259,7 +1318,6 @@ defmodule CuratorWeb.EditorLive do
         phx-value-ref-id={@para.ref_id}
         class="w-7 shrink-0 flex items-center justify-center cursor-pointer rounded-r transition-colors text-base-content/0 group-hover:text-error/40 hover:!bg-error/15 hover:!text-error"
         title="Delete paragraph"
-        data-confirm="Delete this paragraph?"
       >
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5"><path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clip-rule="evenodd"/></svg>
       </button>
@@ -1485,8 +1543,8 @@ defmodule CuratorWeb.EditorLive do
                     </div>
 
                     <%= for {para, idx} <- Enum.with_index(section.paragraphs) do %>
-                      <%!-- Between-paragraph zone --%>
-                      <%= if idx > 0 do %>
+                      <%!-- Between-paragraph zone (hidden during selection mode) --%>
+                      <%= if idx > 0 and @selected_count == 0 do %>
                         <div class="group relative h-3 cursor-pointer hover:h-10 transition-all duration-150 flex items-center justify-center">
                           <div class="hidden group-hover:flex items-center gap-3 absolute inset-x-0 top-0 bottom-0 rounded justify-center">
                             <button
@@ -1515,8 +1573,8 @@ defmodule CuratorWeb.EditorLive do
                 <% else %>
 
                 <%= for {para, idx} <- Enum.with_index(Chapter.all_paragraphs(@chapter)) do %>
-                  <%!-- Between-paragraph zone: glue + section break + chapter break --%>
-                  <%= if idx > 0 do %>
+                  <%!-- Between-paragraph zone (hidden during selection mode) --%>
+                  <%= if idx > 0 and @selected_count == 0 do %>
                     <div class="group relative h-3 cursor-pointer hover:h-10 transition-all duration-150 flex items-center justify-center">
                       <div class="hidden group-hover:flex items-center gap-3 absolute inset-x-0 top-0 bottom-0 rounded justify-center">
                         <button

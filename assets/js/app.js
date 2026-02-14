@@ -163,7 +163,19 @@ const ContentEditable = {
   }
 }
 
-const Hooks = {...colocatedHooks, ScrollSpy, ContentEditable}
+const ShiftClick = {
+  mounted() {
+    this.el.addEventListener("click", (e) => {
+      this.pushEvent("toggle_select", {
+        "ref-id": this.el.dataset.refId,
+        "shift": e.shiftKey
+      })
+      e.preventDefault()
+    })
+  }
+}
+
+const Hooks = {...colocatedHooks, ScrollSpy, ContentEditable, ShiftClick}
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {

@@ -10,36 +10,47 @@ defmodule Curator.Git do
   require Logger
 
   @doc """
-  Stages and commits changes for a slug's directory.
+  Stages changes for a slug's directory.
 
-  Returns `{:ok, sha}` on success or `{:error, reason}` on failure.
+  Returns `:ok` or `{:error, reason}`.
   """
-  def commit(slug, message) do
+  def stage(slug) do
     root = WorkDir.root()
 
     case System.cmd("git", ["add", slug <> "/"], cd: root, stderr_to_stdout: true) do
       {_, 0} ->
-        case System.cmd("git", ["diff", "--cached", "--quiet"], cd: root, stderr_to_stdout: true) do
-          {_, 0} ->
-            # Nothing staged — no changes to commit
-            {:ok, :no_changes}
-
-          {_, 1} ->
-            case System.cmd("git", ["commit", "-m", message], cd: root, stderr_to_stdout: true) do
-              {output, 0} ->
-                sha = parse_commit_sha(output)
-                Logger.info("[Git] Committed #{slug}: #{sha}")
-                {:ok, sha}
-
-              {output, _} ->
-                Logger.error("[Git] Commit failed: #{output}")
-                {:error, String.trim(output)}
-            end
-        end
+        Logger.info("[Git] Staged #{slug}/")
+        :ok
 
       {output, _} ->
         Logger.error("[Git] Add failed: #{output}")
         {:error, String.trim(output)}
+    end
+  end
+
+  @doc """
+  Commits staged changes with the given message.
+
+  Returns `{:ok, sha}`, `{:ok, :no_changes}`, or `{:error, reason}`.
+  """
+  def commit(message) do
+    root = WorkDir.root()
+
+    case System.cmd("git", ["diff", "--cached", "--quiet"], cd: root, stderr_to_stdout: true) do
+      {_, 0} ->
+        {:ok, :no_changes}
+
+      {_, 1} ->
+        case System.cmd("git", ["commit", "-m", message], cd: root, stderr_to_stdout: true) do
+          {output, 0} ->
+            sha = parse_commit_sha(output)
+            Logger.info("[Git] Committed: #{sha}")
+            {:ok, sha}
+
+          {output, _} ->
+            Logger.error("[Git] Commit failed: #{output}")
+            {:error, String.trim(output)}
+        end
     end
   end
 
