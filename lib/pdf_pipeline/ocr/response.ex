@@ -11,8 +11,15 @@ defmodule PdfPipeline.OCR.Response do
   @doc """
   Parses the OCR API response body into extracted text.
 
-  Handles multiple response formats from the GLM-OCR API.
+  Handles multiple response formats from the GLM-OCR API:
+  - Layout parsing format: `md_results` field (primary)
+  - Chat completions format: `choices[].message.content`
+  - Legacy formats: `result.content`, `content`
   """
+  def parse(%{"md_results" => content}) when is_binary(content) do
+    {:ok, normalize_text(content)}
+  end
+
   def parse(%{"choices" => [%{"message" => %{"content" => content}} | _]}) do
     {:ok, normalize_text(content)}
   end
