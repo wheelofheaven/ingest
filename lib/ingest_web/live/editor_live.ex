@@ -36,7 +36,7 @@ defmodule IngestWeb.EditorLive do
   defp load_book(%{"slug" => slug}) do
     case Normalize.load_book(slug) do
       {:ok, book} -> {:ok, book, slug, :work_dir}
-      {:error, _} -> {:error, "No book.json found in _work/#{slug}/"}
+      {:error, _} -> {:error, "No book.json found for #{slug}"}
     end
   end
 
@@ -59,7 +59,7 @@ defmodule IngestWeb.EditorLive do
      |> assign(:selected_refs, MapSet.new())}
   end
 
-  # -- Single paragraph editing --
+  # -- Paragraph editing --
 
   def handle_event("edit_paragraph", %{"ref-id" => ref_id}, socket) do
     {:noreply, assign(socket, :editing_paragraph, ref_id)}
@@ -80,11 +80,10 @@ defmodule IngestWeb.EditorLive do
      socket
      |> assign(:book, book)
      |> assign(:editing_paragraph, nil)
-     |> assign(:dirty, true)
-     |> put_flash(:info, "Paragraph #{ref_id} updated")}
+     |> assign(:dirty, true)}
   end
 
-  # -- Delete single paragraph --
+  # -- Delete paragraph --
 
   def handle_event("delete_paragraph", %{"ref-id" => ref_id}, socket) do
     book = delete_paragraphs(socket.assigns.book, [ref_id])
@@ -93,8 +92,7 @@ defmodule IngestWeb.EditorLive do
      socket
      |> assign(:book, book)
      |> assign(:dirty, true)
-     |> assign(:repeated_patterns, detect_repeated_patterns(book))
-     |> put_flash(:info, "Paragraph deleted")}
+     |> assign(:repeated_patterns, detect_repeated_patterns(book))}
   end
 
   # -- Multi-select --
@@ -161,7 +159,7 @@ defmodule IngestWeb.EditorLive do
      |> put_flash(:info, "Speaker set for #{MapSet.size(refs)} paragraphs")}
   end
 
-  # -- Repeated pattern detection & removal --
+  # -- Repeated patterns --
 
   def handle_event("toggle_patterns", _params, socket) do
     {:noreply, assign(socket, :show_patterns, !socket.assigns.show_patterns)}
@@ -183,7 +181,7 @@ defmodule IngestWeb.EditorLive do
      |> assign(:book, book)
      |> assign(:dirty, true)
      |> assign(:repeated_patterns, detect_repeated_patterns(book))
-     |> put_flash(:info, "Removed #{length(matching_refs)} occurrences of repeated text")}
+     |> put_flash(:info, "Removed #{length(matching_refs)} occurrences")}
   end
 
   def handle_event("select_pattern", %{"pattern" => pattern}, socket) do
@@ -197,19 +195,6 @@ defmodule IngestWeb.EditorLive do
       |> MapSet.new()
 
     {:noreply, assign(socket, :selected_refs, matching_refs)}
-  end
-
-  # -- Split paragraph --
-
-  def handle_event("split_paragraph", %{"ref-id" => ref_id, "position" => pos_str}, socket) do
-    position = String.to_integer(pos_str)
-    book = split_paragraph_at(socket.assigns.book, ref_id, position)
-
-    {:noreply,
-     socket
-     |> assign(:book, book)
-     |> assign(:dirty, true)
-     |> put_flash(:info, "Paragraph split")}
   end
 
   # -- Merge with next --
@@ -228,8 +213,21 @@ defmodule IngestWeb.EditorLive do
     {:noreply,
      socket
      |> assign(:book, book)
+     |> assign(:dirty, true)}
+  end
+
+  # -- Chapter break insertion (the key interaction) --
+
+  def handle_event("insert_chapter_break", %{"ref-id" => ref_id}, socket) do
+    book = socket.assigns.book
+    chapter_n = socket.assigns.selected_chapter
+    book = split_chapter_at_paragraph(book, chapter_n, ref_id)
+
+    {:noreply,
+     socket
+     |> assign(:book, book)
      |> assign(:dirty, true)
-     |> put_flash(:info, "Paragraphs merged")}
+     |> put_flash(:info, "Chapter break inserted")}
   end
 
   # -- Chapter editing --
@@ -247,8 +245,7 @@ defmodule IngestWeb.EditorLive do
      socket
      |> assign(:book, %{book | chapters: chapters})
      |> assign(:editing_chapter, nil)
-     |> assign(:dirty, true)
-     |> put_flash(:info, "Chapter #{n} renamed")}
+     |> assign(:dirty, true)}
   end
 
   def handle_event("edit_chapter_title", %{"chapter" => n_str}, socket) do
@@ -259,28 +256,23 @@ defmodule IngestWeb.EditorLive do
     {:noreply, assign(socket, :editing_chapter, nil)}
   end
 
-  def handle_event("split_chapter_here", %{"ref-id" => ref_id}, socket) do
-    book = socket.assigns.book
-    chapter_n = socket.assigns.selected_chapter
-    book = split_chapter_at_paragraph(book, chapter_n, ref_id)
-
-    {:noreply,
-     socket
-     |> assign(:book, book)
-     |> assign(:dirty, true)
-     |> put_flash(:info, "Chapter split at paragraph #{ref_id}")}
-  end
-
-  def handle_event("merge_chapter_with_next", %{"chapter" => n_str}, socket) do
+  def handle_event("remove_chapter_break", %{"chapter" => n_str}, socket) do
     n = String.to_integer(n_str)
     book = socket.assigns.book
-    book = merge_chapters(book, n)
 
-    {:noreply,
-     socket
-     |> assign(:book, book)
-     |> assign(:dirty, true)
-     |> put_flash(:info, "Chapters merged")}
+    if n > 1 do
+      # Merge this chapter into the previous one
+      book = merge_chapters(book, n - 1)
+
+      {:noreply,
+       socket
+       |> assign(:book, book)
+       |> assign(:selected_chapter, n - 1)
+       |> assign(:dirty, true)
+       |> put_flash(:info, "Chapter break removed — merged with previous")}
+    else
+      {:noreply, put_flash(socket, :error, "Cannot remove the first chapter break")}
+    end
   end
 
   def handle_event("delete_chapter", %{"chapter" => n_str}, socket) do
@@ -301,22 +293,7 @@ defmodule IngestWeb.EditorLive do
      |> put_flash(:info, "Chapter deleted")}
   end
 
-  def handle_event("add_chapter", _params, socket) do
-    book = socket.assigns.book
-    new_n = length(book.chapters) + 1
-
-    new_chapter = Chapter.new(%{n: new_n, title: "New Chapter", paragraphs: []})
-    book = %{book | chapters: book.chapters ++ [new_chapter]} |> Book.assign_ref_ids()
-
-    {:noreply,
-     socket
-     |> assign(:book, book)
-     |> assign(:selected_chapter, new_n)
-     |> assign(:dirty, true)
-     |> put_flash(:info, "Chapter #{new_n} added")}
-  end
-
-  # -- Save to work directory --
+  # -- Save --
 
   def handle_event("save_to_disk", _params, socket) do
     book = socket.assigns.book
@@ -325,7 +302,6 @@ defmodule IngestWeb.EditorLive do
     encoded = Jason.encode!(json, pretty: true)
     {:ok, path} = WorkDir.write_artifact(slug, "book.json", encoded)
 
-    # Also update the job if we have one
     case socket.assigns.source do
       {:job, job_id} -> Job.update(job_id, %{book: book})
       _ -> :ok
@@ -369,32 +345,6 @@ defmodule IngestWeb.EditorLive do
     %{book | chapters: chapters} |> Book.assign_ref_ids()
   end
 
-  defp split_paragraph_at(book, ref_id, position) do
-    chapters =
-      Enum.map(book.chapters, fn chapter ->
-        case Enum.find_index(chapter.paragraphs, &(&1.ref_id == ref_id)) do
-          nil ->
-            chapter
-
-          idx ->
-            para = Enum.at(chapter.paragraphs, idx)
-            {before_text, after_text} = String.split_at(para.text, position)
-
-            first = %{para | text: String.trim(before_text)}
-            second = %{para | text: String.trim(after_text), n: para.n + 1, ref_id: nil}
-
-            paragraphs =
-              chapter.paragraphs
-              |> List.replace_at(idx, first)
-              |> List.insert_at(idx + 1, second)
-
-            %{chapter | paragraphs: paragraphs}
-        end
-      end)
-
-    %{book | chapters: chapters} |> Book.assign_ref_ids()
-  end
-
   defp merge_paragraphs(chapter, ref_id) do
     paragraphs = chapter.paragraphs
     idx = Enum.find_index(paragraphs, &(&1.ref_id == ref_id))
@@ -427,11 +377,11 @@ defmodule IngestWeb.EditorLive do
             idx ->
               {before_paras, after_paras} = Enum.split(chapter.paragraphs, idx)
 
-              # Use the text of the split paragraph as hint for the new chapter title
-              first_para_text = List.first(after_paras)
+              first_para = List.first(after_paras)
+
               new_title =
-                if first_para_text,
-                  do: String.slice(first_para_text.text, 0, 60) |> String.trim(),
+                if first_para,
+                  do: String.slice(first_para.text, 0, 60) |> String.trim(),
                   else: "New Chapter"
 
               [
@@ -477,13 +427,7 @@ defmodule IngestWeb.EditorLive do
     |> Enum.map(fn {text, count} -> %{text: text, count: count, short: String.slice(text, 0, 80)} end)
   end
 
-  defp confidence_class(confidence) do
-    cond do
-      confidence >= 0.8 -> "border-l-success"
-      confidence >= 0.5 -> "border-l-warning"
-      true -> "border-l-error"
-    end
-  end
+  # -- Render --
 
   @impl true
   def render(assigns) do
@@ -493,278 +437,236 @@ defmodule IngestWeb.EditorLive do
 
     ~H"""
     <IngestWeb.Layouts.app flash={@flash}>
-      <div class="space-y-4">
-        <%!-- Header --%>
+      <div class="space-y-3">
+        <%!-- Header bar --%>
         <div class="flex items-center justify-between">
           <div>
-            <h1 class="text-2xl font-bold">Edit: {@slug}</h1>
-            <p class="text-base-content/60 text-sm">
-              {Book.chapter_count(@book)} chapters, {Book.paragraph_count(@book)} paragraphs
+            <h1 class="text-xl font-bold">{@slug}</h1>
+            <p class="text-base-content/50 text-xs">
+              {Book.chapter_count(@book)} chapters · {Book.paragraph_count(@book)} paragraphs
             </p>
           </div>
           <div class="flex gap-2 items-center">
             <%= if @dirty do %>
-              <span class="badge badge-warning badge-sm">unsaved</span>
+              <span class="badge badge-warning badge-xs">unsaved</span>
             <% end %>
             <button phx-click="save_to_disk" class={"btn btn-sm #{if @dirty, do: "btn-warning", else: "btn-ghost"}"}>
               Save
             </button>
-            <.link navigate={~p"/"} class="btn btn-ghost btn-sm">
-              Dashboard
-            </.link>
+            <.link navigate={~p"/"} class="btn btn-ghost btn-sm">Back</.link>
           </div>
         </div>
 
-        <%!-- Repeated Patterns Alert --%>
+        <%!-- Repeated patterns (collapsible) --%>
         <%= if @repeated_patterns != [] do %>
-          <div class="alert shadow-sm">
-            <div class="flex-1">
-              <button phx-click="toggle_patterns" class="flex items-center gap-2 w-full text-left">
-                <span class="font-semibold">
-                  {length(@repeated_patterns)} repeated text patterns detected
-                </span>
-                <span class="text-xs text-base-content/50">
-                  (likely page headers/footers — click to review)
-                </span>
-                <span class="ml-auto text-xs">{if @show_patterns, do: "Hide", else: "Show"}</span>
-              </button>
-
-              <%= if @show_patterns do %>
-                <div class="mt-3 space-y-2">
-                  <%= for pattern <- @repeated_patterns do %>
-                    <div class="flex items-center gap-2 bg-base-200 rounded-lg p-2">
-                      <div class="flex-1 min-w-0">
-                        <p class="text-sm font-mono truncate">{pattern.short}<%= if String.length(pattern.text) > 80, do: "..." %></p>
-                        <p class="text-xs text-base-content/40">{pattern.count} occurrences</p>
-                      </div>
-                      <button
-                        phx-click="select_pattern"
-                        phx-value-pattern={pattern.text}
-                        class="btn btn-ghost btn-xs"
-                      >
-                        Select
-                      </button>
-                      <button
-                        phx-click="remove_pattern"
-                        phx-value-pattern={pattern.text}
-                        class="btn btn-error btn-xs"
-                        data-confirm={"Remove all #{pattern.count} occurrences of this text?"}
-                      >
-                        Remove all
-                      </button>
-                    </div>
-                  <% end %>
-                </div>
-              <% end %>
-            </div>
+          <div class="bg-base-200 rounded-lg p-3">
+            <button phx-click="toggle_patterns" class="flex items-center gap-2 w-full text-left text-sm">
+              <span class="font-semibold">{length(@repeated_patterns)} repeated patterns</span>
+              <span class="text-base-content/40 text-xs">(page headers/footers)</span>
+              <span class="ml-auto text-xs">{if @show_patterns, do: "Hide", else: "Show"}</span>
+            </button>
+            <%= if @show_patterns do %>
+              <div class="mt-2 space-y-1">
+                <%= for pattern <- @repeated_patterns do %>
+                  <div class="flex items-center gap-2 bg-base-100 rounded p-2 text-sm">
+                    <span class="flex-1 font-mono text-xs truncate">{pattern.short}</span>
+                    <span class="badge badge-ghost badge-xs">{pattern.count}x</span>
+                    <button phx-click="select_pattern" phx-value-pattern={pattern.text} class="btn btn-ghost btn-xs">Select</button>
+                    <button
+                      phx-click="remove_pattern"
+                      phx-value-pattern={pattern.text}
+                      class="btn btn-error btn-xs"
+                      data-confirm={"Remove all #{pattern.count} occurrences?"}
+                    >Remove</button>
+                  </div>
+                <% end %>
+              </div>
+            <% end %>
           </div>
         <% end %>
 
-        <%!-- Bulk Actions Bar --%>
+        <%!-- Bulk actions bar (sticky) --%>
         <%= if @selected_count > 0 do %>
-          <div class="sticky top-0 z-10 bg-base-300 rounded-lg p-3 flex items-center gap-3 shadow-lg">
-            <span class="font-semibold text-sm">{@selected_count} selected</span>
+          <div class="sticky top-0 z-10 bg-base-300 rounded-lg p-2 flex items-center gap-3 shadow-lg text-sm">
+            <span class="font-semibold">{@selected_count} selected</span>
             <button phx-click="select_none" class="btn btn-ghost btn-xs">Clear</button>
             <div class="divider divider-horizontal mx-0"></div>
             <button
               phx-click="delete_selected"
-              class="btn btn-error btn-sm"
-              data-confirm={"Delete #{@selected_count} selected paragraphs?"}
-            >
-              Delete selected
-            </button>
-            <form phx-submit="set_speaker_selected" class="flex items-center gap-2">
-              <input
-                type="text"
-                name="speaker"
-                placeholder="Set speaker..."
-                class="input input-bordered input-sm w-40"
-              />
-              <button type="submit" class="btn btn-sm btn-ghost">Apply</button>
+              class="btn btn-error btn-xs"
+              data-confirm={"Delete #{@selected_count} paragraphs?"}
+            >Delete</button>
+            <form phx-submit="set_speaker_selected" class="flex items-center gap-1">
+              <input type="text" name="speaker" placeholder="Speaker..." class="input input-bordered input-xs w-32" />
+              <button type="submit" class="btn btn-xs btn-ghost">Set</button>
             </form>
           </div>
         <% end %>
 
-        <div class="grid grid-cols-1 lg:grid-cols-5 gap-4">
-          <%!-- Chapter Navigation --%>
-          <div class="lg:col-span-1">
-            <div class="card bg-base-200">
-              <div class="card-body p-3">
-                <div class="flex items-center justify-between mb-2">
-                  <h3 class="font-semibold text-sm">Chapters</h3>
-                  <button phx-click="add_chapter" class="btn btn-ghost btn-xs">+ Add</button>
-                </div>
-                <ul class="menu menu-xs bg-base-100 rounded-box">
-                  <%= for ch <- @book.chapters do %>
-                    <li>
-                      <%= if @editing_chapter == ch.n do %>
-                        <form phx-submit="rename_chapter" class="p-1">
-                          <input type="hidden" name="chapter" value={ch.n} />
-                          <input
-                            type="text"
-                            name="title"
-                            value={ch.title}
-                            class="input input-bordered input-xs w-full mb-1"
-                            autofocus
-                          />
-                          <div class="flex gap-1">
-                            <button type="submit" class="btn btn-primary btn-xs flex-1">Save</button>
-                            <button type="button" phx-click="cancel_edit_chapter" class="btn btn-ghost btn-xs">X</button>
-                          </div>
-                        </form>
-                      <% else %>
-                        <div class="flex items-center group">
-                          <button
-                            phx-click="select_chapter"
-                            phx-value-chapter={ch.n}
-                            class={"flex-1 text-left #{if @selected_chapter == ch.n, do: "active", else: ""}"}
-                          >
-                            <span class="font-mono text-xs">{ch.n}.</span>
-                            <span class="truncate">{ch.title}</span>
-                            <span class="badge badge-xs badge-ghost">{length(ch.paragraphs)}</span>
-                          </button>
-                          <div class="hidden group-hover:flex gap-0.5 ml-1">
-                            <button
-                              phx-click="edit_chapter_title"
-                              phx-value-chapter={ch.n}
-                              class="btn btn-ghost btn-xs px-1"
-                              title="Rename"
-                            >R</button>
-                            <button
-                              phx-click="merge_chapter_with_next"
-                              phx-value-chapter={ch.n}
-                              class="btn btn-ghost btn-xs px-1"
-                              title="Merge with next"
-                            >M</button>
-                            <button
-                              phx-click="delete_chapter"
-                              phx-value-chapter={ch.n}
-                              class="btn btn-ghost btn-xs px-1 text-error"
-                              title="Delete chapter"
-                              data-confirm={"Delete chapter #{ch.n}: #{ch.title}?"}
-                            >X</button>
-                          </div>
-                        </div>
-                      <% end %>
-                    </li>
-                  <% end %>
-                </ul>
-              </div>
+        <div class="flex gap-4">
+          <%!-- Chapter sidebar (navigation) --%>
+          <div class="w-56 shrink-0">
+            <div class="sticky top-2">
+              <h3 class="font-semibold text-xs text-base-content/50 uppercase tracking-wide mb-2">Chapters</h3>
+              <ul class="space-y-0.5">
+                <%= for ch <- @book.chapters do %>
+                  <li>
+                    <button
+                      phx-click="select_chapter"
+                      phx-value-chapter={ch.n}
+                      class={"flex items-center gap-1.5 w-full text-left px-2 py-1 rounded text-sm hover:bg-base-200 transition-colors #{if @selected_chapter == ch.n, do: "bg-base-200 font-medium", else: ""}"}
+                    >
+                      <span class="text-base-content/30 font-mono text-xs w-5 text-right shrink-0">{ch.n}</span>
+                      <span class="truncate flex-1">{ch.title}</span>
+                      <span class="text-base-content/30 text-xs">{length(ch.paragraphs)}</span>
+                    </button>
+                  </li>
+                <% end %>
+              </ul>
             </div>
           </div>
 
-          <%!-- Editor Panel --%>
-          <div class="lg:col-span-4 space-y-2">
+          <%!-- Main content area --%>
+          <div class="flex-1 min-w-0">
             <%= if @chapter do %>
-              <div class="flex items-center justify-between mb-2">
-                <h2 class="text-lg font-semibold">
-                  Chapter {@chapter.n}: {@chapter.title}
-                  <span class="text-sm font-normal text-base-content/40">
-                    ({Chapter.paragraph_count(@chapter)} paragraphs)
-                  </span>
-                </h2>
-                <div class="flex gap-1">
-                  <button phx-click="select_all_chapter" class="btn btn-ghost btn-xs">
-                    Select all
-                  </button>
-                  <%= if @selected_count > 0 do %>
-                    <button phx-click="select_none" class="btn btn-ghost btn-xs">
-                      Clear
-                    </button>
-                  <% end %>
-                </div>
+              <%!-- Chapter divider / header --%>
+              <div class="flex items-center gap-2 mb-3 pb-2 border-b-2 border-primary/30" id={"chapter-#{@chapter.n}"}>
+                <span class="text-primary font-mono text-sm font-bold">Ch. {@chapter.n}</span>
+                <%= if @editing_chapter == @chapter.n do %>
+                  <form phx-submit="rename_chapter" class="flex items-center gap-1 flex-1">
+                    <input type="hidden" name="chapter" value={@chapter.n} />
+                    <input type="text" name="title" value={@chapter.title} class="input input-bordered input-sm flex-1" autofocus />
+                    <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                    <button type="button" phx-click="cancel_edit_chapter" class="btn btn-ghost btn-sm">Cancel</button>
+                  </form>
+                <% else %>
+                  <h2
+                    class="text-lg font-semibold flex-1 cursor-pointer hover:text-primary transition-colors"
+                    phx-click="edit_chapter_title"
+                    phx-value-chapter={@chapter.n}
+                    title="Click to rename"
+                  >{@chapter.title}</h2>
+                <% end %>
+                <span class="text-base-content/30 text-xs">{length(@chapter.paragraphs)} paragraphs</span>
+                <%= if @chapter.n > 1 do %>
+                  <button
+                    phx-click="remove_chapter_break"
+                    phx-value-chapter={@chapter.n}
+                    class="btn btn-ghost btn-xs text-base-content/40 hover:text-warning"
+                    title="Remove this chapter break (merge with previous)"
+                  >Merge up</button>
+                <% end %>
               </div>
 
-              <%= for para <- @chapter.paragraphs do %>
-                <div class={"card bg-base-100 border-l-4 #{confidence_class(para.confidence)} #{if MapSet.member?(@selected_refs, para.ref_id), do: "ring-2 ring-primary", else: ""}"}>
-                  <div class="card-body p-3">
-                    <%= if @editing_paragraph == para.ref_id do %>
-                      <%!-- Edit Mode --%>
+              <%!-- Paragraph list with interactive gaps --%>
+              <div class="space-y-0">
+                <div class="flex items-center justify-end mb-1">
+                  <button phx-click="select_all_chapter" class="btn btn-ghost btn-xs text-base-content/40">Select all</button>
+                </div>
+
+                <%= for {para, idx} <- Enum.with_index(@chapter.paragraphs) do %>
+                  <%!-- Chapter break insertion gap (between paragraphs) --%>
+                  <%= if idx > 0 do %>
+                    <div
+                      class="group relative h-1 -my-0.5 cursor-pointer hover:h-8 transition-all duration-150 flex items-center justify-center"
+                      phx-click="insert_chapter_break"
+                      phx-value-ref-id={para.ref_id}
+                    >
+                      <div class="hidden group-hover:flex items-center gap-2 absolute inset-x-0 top-0 bottom-0 bg-info/10 rounded border border-dashed border-info/30 justify-center">
+                        <span class="text-info text-xs font-medium">+ Insert chapter break here</span>
+                      </div>
+                    </div>
+                  <% end %>
+
+                  <%!-- Paragraph row --%>
+                  <%= if @editing_paragraph == para.ref_id do %>
+                    <%!-- Editing mode --%>
+                    <div class="bg-base-200 rounded-lg p-3 my-1">
                       <form phx-submit="save_paragraph">
                         <input type="hidden" name="ref_id" value={para.ref_id} />
-                        <div class="grid grid-cols-2 gap-2 mb-2">
-                          <div class="form-control">
+                        <div class="flex gap-2 mb-2">
+                          <div class="form-control flex-1">
                             <label class="label py-0"><span class="label-text text-xs">Speaker</span></label>
-                            <input
-                              type="text"
-                              name="speaker"
-                              value={para.speaker || ""}
-                              placeholder="(none)"
-                              class="input input-bordered input-sm w-full"
-                            />
+                            <input type="text" name="speaker" value={para.speaker || ""} placeholder="(none)" class="input input-bordered input-sm" />
                           </div>
                           <div class="form-control">
-                            <label class="label py-0"><span class="label-text text-xs">Split at position</span></label>
-                            <div class="flex gap-1">
-                              <input type="number" id={"split-pos-#{para.ref_id}"} min="1" max={String.length(para.text) - 1} value={div(String.length(para.text), 2)} class="input input-bordered input-sm flex-1" />
-                              <button
-                                type="button"
-                                phx-click="split_paragraph"
-                                phx-value-ref-id={para.ref_id}
-                                phx-value-position={div(String.length(para.text), 2)}
-                                class="btn btn-ghost btn-sm"
-                              >
-                                Split
-                              </button>
-                            </div>
+                            <label class="label py-0"><span class="label-text text-xs">Ref</span></label>
+                            <span class="font-mono text-xs pt-2 text-base-content/40">{para.ref_id}</span>
                           </div>
                         </div>
-                        <div class="form-control mb-2">
-                          <textarea
-                            name="text"
-                            rows={max(3, div(String.length(para.text), 80) + 1)}
-                            class="textarea textarea-bordered w-full text-sm"
-                          >{para.text}</textarea>
-                        </div>
-                        <div class="flex gap-2 justify-end">
+                        <textarea
+                          name="text"
+                          rows={max(3, div(String.length(para.text), 80) + 1)}
+                          class="textarea textarea-bordered w-full text-sm mb-2"
+                        >{para.text}</textarea>
+                        <div class="flex gap-1 justify-end">
                           <button type="button" phx-click="cancel_edit" class="btn btn-ghost btn-xs">Cancel</button>
                           <button type="submit" class="btn btn-primary btn-xs">Save</button>
                         </div>
                       </form>
-                    <% else %>
-                      <%!-- View Mode --%>
-                      <div class="flex items-center gap-2 mb-1">
-                        <input
-                          type="checkbox"
-                          class="checkbox checkbox-xs checkbox-primary"
-                          checked={MapSet.member?(@selected_refs, para.ref_id)}
-                          phx-click="toggle_select"
+                    </div>
+                  <% else %>
+                    <%!-- View mode — compact row --%>
+                    <div class={"group flex items-start gap-2 py-1.5 px-2 rounded hover:bg-base-200/50 transition-colors #{if MapSet.member?(@selected_refs, para.ref_id), do: "bg-primary/5 ring-1 ring-primary/20", else: ""}"}>
+                      <%!-- Checkbox --%>
+                      <input
+                        type="checkbox"
+                        class="checkbox checkbox-xs checkbox-primary mt-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                        checked={MapSet.member?(@selected_refs, para.ref_id)}
+                        phx-click="toggle_select"
+                        phx-value-ref-id={para.ref_id}
+                        style={if MapSet.member?(@selected_refs, para.ref_id), do: "opacity: 1", else: ""}
+                      />
+
+                      <%!-- Ref ID --%>
+                      <span class="font-mono text-xs text-base-content/20 w-16 shrink-0 pt-0.5 text-right">{para.ref_id}</span>
+
+                      <%!-- Speaker badge --%>
+                      <%= if para.speaker do %>
+                        <span class="badge badge-xs badge-outline shrink-0 mt-0.5">{para.speaker}</span>
+                      <% end %>
+
+                      <%!-- Text --%>
+                      <p class="text-sm flex-1 min-w-0">{para.text}</p>
+
+                      <%!-- Hover actions --%>
+                      <div class="hidden group-hover:flex gap-0.5 shrink-0">
+                        <button phx-click="edit_paragraph" phx-value-ref-id={para.ref_id} class="btn btn-ghost btn-xs px-1" title="Edit">
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3 h-3"><path d="M13.488 2.513a1.75 1.75 0 0 0-2.475 0L6.05 7.475a.75.75 0 0 0-.186.312l-.9 3.15a.75.75 0 0 0 .926.926l3.15-.9a.75.75 0 0 0 .312-.186l4.963-4.963a1.75 1.75 0 0 0 0-2.475l-.827-.826ZM11.72 3.22a.25.25 0 0 1 .354 0l.826.826a.25.25 0 0 1 0 .354L8.55 8.75l-1.186.339.338-1.186L11.72 3.22Z"/></svg>
+                        </button>
+                        <button phx-click="merge_with_next" phx-value-ref-id={para.ref_id} class="btn btn-ghost btn-xs px-1" title="Merge with next">
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3 h-3"><path d="M2 7.75a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 7.75Z"/></svg>
+                        </button>
+                        <button
+                          phx-click="delete_paragraph"
                           phx-value-ref-id={para.ref_id}
-                        />
-                        <span class="font-mono text-xs text-base-content/40">{para.ref_id}</span>
-                        <%= if para.speaker do %>
-                          <span class="badge badge-xs badge-outline">{para.speaker}</span>
-                        <% end %>
-                        <span class="text-xs text-base-content/20">
-                          {String.length(para.text)} chars
-                        </span>
-                        <div class="flex-1"></div>
-                        <div class="flex gap-0.5">
-                          <button phx-click="edit_paragraph" phx-value-ref-id={para.ref_id} class="btn btn-ghost btn-xs">Edit</button>
-                          <button phx-click="merge_with_next" phx-value-ref-id={para.ref_id} class="btn btn-ghost btn-xs">Merge</button>
-                          <button
-                            phx-click="split_chapter_here"
-                            phx-value-ref-id={para.ref_id}
-                            class="btn btn-ghost btn-xs text-info"
-                            title="Start a new chapter from this paragraph"
-                          >
-                            Ch.Split
-                          </button>
-                          <button
-                            phx-click="delete_paragraph"
-                            phx-value-ref-id={para.ref_id}
-                            class="btn btn-ghost btn-xs text-error"
-                            data-confirm="Delete this paragraph?"
-                          >
-                            Delete
-                          </button>
-                        </div>
+                          class="btn btn-ghost btn-xs px-1 text-error"
+                          title="Delete"
+                          data-confirm="Delete this paragraph?"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3 h-3"><path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clip-rule="evenodd"/></svg>
+                        </button>
                       </div>
-                      <p class="text-sm pl-6">{para.text}</p>
-                    <% end %>
-                  </div>
-                </div>
-              <% end %>
+                    </div>
+                  <% end %>
+                <% end %>
+              </div>
+
+              <%!-- Chapter navigation footer --%>
+              <div class="flex items-center justify-between mt-4 pt-3 border-t border-base-200">
+                <%= if @chapter.n > 1 do %>
+                  <button phx-click="select_chapter" phx-value-chapter={@chapter.n - 1} class="btn btn-ghost btn-sm">
+                    &larr; Previous chapter
+                  </button>
+                <% else %>
+                  <div></div>
+                <% end %>
+                <%= if @chapter.n < Book.chapter_count(@book) do %>
+                  <button phx-click="select_chapter" phx-value-chapter={@chapter.n + 1} class="btn btn-ghost btn-sm">
+                    Next chapter &rarr;
+                  </button>
+                <% end %>
+              </div>
             <% else %>
               <p class="text-base-content/40">Select a chapter to edit.</p>
             <% end %>
