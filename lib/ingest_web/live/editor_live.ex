@@ -1187,7 +1187,7 @@ defmodule IngestWeb.EditorLive do
       <button
         phx-click="toggle_vet"
         phx-value-ref-id={@para.ref_id}
-        class={"w-6 shrink-0 flex items-center justify-center cursor-pointer rounded-l transition-colors #{case @para.vetted do
+        class={"w-7 shrink-0 flex items-center justify-center cursor-pointer rounded-l transition-colors #{case @para.vetted do
           true -> "bg-success/20 text-success hover:bg-success/30"
           :skipped -> "bg-warning/10 text-warning/60 hover:bg-warning/20"
           _ -> "text-base-content/15 hover:bg-success/10 hover:text-success/50"
@@ -1198,16 +1198,16 @@ defmodule IngestWeb.EditorLive do
           _ -> "Mark as vetted (+ all above)"
         end}
       >
-        <span class="text-xs font-bold">{case @para.vetted do
-          true -> "✓"
-          :skipped -> "–"
-          _ -> ""
-        end}</span>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5"><path fill-rule="evenodd" d={case @para.vetted do
+          true -> "M12.416 3.376a.75.75 0 0 1 .208 1.04l-5 7.5a.75.75 0 0 1-1.154.114l-3-3a.75.75 0 0 1 1.06-1.06l2.353 2.353 4.493-6.74a.75.75 0 0 1 1.04-.207Z"
+          :skipped -> "M3.75 7.25a.75.75 0 0 0 0 1.5h8.5a.75.75 0 0 0 0-1.5h-8.5Z"
+          _ -> "M8 1a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-1.5 0v-6.5A.75.75 0 0 1 8 1ZM8 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"
+        end} clip-rule="evenodd"/></svg>
       </button>
 
       <%!-- Content area --%>
       <div class="flex-1 min-w-0 py-1.5 px-2">
-        <%!-- Line 1: metadata + actions --%>
+        <%!-- Line 1: metadata --%>
         <div class="flex items-center gap-2 mb-0.5">
           <input
             type="checkbox"
@@ -1237,12 +1237,6 @@ defmodule IngestWeb.EditorLive do
               >{if @para.speaker == speaker, do: speaker, else: Map.get(@speaker_abbrevs, speaker, String.first(speaker))}</button>
             <% end %>
           </div>
-          <div class="flex-1"></div>
-          <div class="hidden group-hover:flex gap-1 shrink-0">
-            <button phx-click="delete_paragraph" phx-value-ref-id={@para.ref_id} class="btn btn-ghost btn-sm px-2 text-error" title="Delete" data-confirm="Delete this paragraph?">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-4 h-4"><path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clip-rule="evenodd"/></svg>
-            </button>
-          </div>
         </div>
         <%!-- Line 2: text content — becomes contenteditable when editing --%>
         <p
@@ -1255,6 +1249,17 @@ defmodule IngestWeb.EditorLive do
           class={"text-sm transition-all outline-none #{if @editing_paragraph == @para.ref_id, do: "bg-base-200 ring-1 ring-primary/30 rounded px-2 py-1 -mx-2", else: "cursor-pointer hover:text-primary/80"}"}
         >{@para.text}</p>
       </div>
+
+      <%!-- Delete gutter — full height click target, mirrors vet gutter --%>
+      <button
+        phx-click="delete_paragraph"
+        phx-value-ref-id={@para.ref_id}
+        class="w-7 shrink-0 flex items-center justify-center cursor-pointer rounded-r transition-colors text-base-content/0 group-hover:text-error/40 hover:!bg-error/15 hover:!text-error"
+        title="Delete paragraph"
+        data-confirm="Delete this paragraph?"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5"><path fill-rule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clip-rule="evenodd"/></svg>
+      </button>
     </div>
     """
   end
