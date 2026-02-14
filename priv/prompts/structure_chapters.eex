@@ -1,0 +1,21 @@
+You are analyzing OCR-extracted text from "<%= @book_title %>" to identify chapter boundaries.
+
+The text is in <%= @language %> and was extracted via OCR, so it may contain:
+- Page numbers mixed into the text
+- Headers/footers repeated on each page
+- Occasional OCR artifacts
+
+Please identify all chapter boundaries in the following text. For each chapter, provide:
+1. The chapter number
+2. The chapter title (if present)
+3. The line number where the chapter begins
+
+Respond in JSON format:
+[
+  {"number": 1, "title": "Chapter Title", "starts_at_line": 1},
+  ...
+]
+
+Text to analyze:
+
+<%= @text %>

@@ -1,0 +1,54 @@
+{
+  "slug": "test-book",
+  "code": "TB",
+  "primaryLang": "fr",
+  "titles": {
+    "fr": "Test Book"
+  },
+  "publicationYear": 1973,
+  "schema": ["book", "chapters", "paragraphs"],
+  "revision": 1,
+  "refId": "TB",
+  "chapterCount": 3,
+  "paragraphCount": 9,
+  "chapters": [
+    {
+      "n": 1,
+      "title": "La Rencontre",
+      "refId": "TB-1",
+      "paragraphs": [
+        {
+          "n": 1,
+          "refId": "TB-1:1",
+          "speaker": "Narrator",
+          "text": "Depuis l'âge de neuf ans, j'ai toujours eu la passion des sports mécaniques. Courses automobiles, courses de motos, j'étais un véritable passionné."
+        },
+        {
+          "n": 2,
+          "refId": "TB-1:2",
+          "speaker": "Narrator",
+          "text": "À sept ans, j'avais déjà construit un petit véhicule avec un moteur de machine à laver."
+        },
+        {
+          "n": 3,
+          "refId": "TB-1:3",
+          "speaker": "Narrator",
+          "text": "Mon père m'a toujours encouragé dans cette voie."
+        }
+      ]
+    },
+    {
+      "n": 2,
+      "title": "La Vérité",
+      "refId": "TB-2",
+      "paragraphs": [
+        {
+          "n": 1,
+          "refId": "TB-2:1",
+          "speaker": "Yahweh",
+          "text": "Yahweh: Il y a très longtemps sur une planète lointaine, nous avons atteint un niveau de connaissance scientifique très avancé."
+        }
+      ]
+    }
+  ]
+}

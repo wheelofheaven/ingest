@@ -1,0 +1,21 @@
+You are reviewing paragraph boundaries from "<%= @book_title %>" that an automated parser
+flagged as potentially incorrect.
+
+For each paragraph below, determine if it should be:
+- "keep" — boundaries are correct as-is
+- "split" — should be split into multiple paragraphs (provide the text of each new paragraph)
+- "merge_with_next" — should be merged with the following paragraph
+
+Respond as a JSON array:
+[
+  {"n": <number>, "action": "keep"},
+  {"n": <number>, "action": "split", "parts": ["first part text", "second part text"]},
+  {"n": <number>, "action": "merge_with_next"}
+]
+
+Paragraphs to review:
+
+<%= for p <- @paragraphs do %>
+[Paragraph <%= p.n %>]: <%= p.text %>
+
+<% end %>

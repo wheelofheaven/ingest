@@ -1,0 +1,21 @@
+You are analyzing dialogue paragraphs from "<%= @book_title %>" to identify speakers.
+
+<%= if @known_speakers != [] do %>Known speakers in this text: <%= Enum.join(@known_speakers, ", ") %>.<% end %>
+
+Context: This is a <%= @tradition || "religious/philosophical" %> text. The paragraphs below contain
+dialogue or narration where the speaker is ambiguous.
+
+For each paragraph, identify who is speaking:
+- Use exact names from the known speakers list when possible
+- Use "Narrator" for narrative/descriptive passages
+- Use null if you genuinely cannot determine the speaker
+
+Respond as a JSON array:
+[{"n": <paragraph_number>, "speaker": "<name or null>"}]
+
+Paragraphs:
+
+<%= for p <- @paragraphs do %>
+[Paragraph <%= p.n %>]: <%= p.text %>
+
+<% end %>

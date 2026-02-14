@@ -1,0 +1,75 @@
+# mise.toml
+
+min_version = "2025.8.3"
+
+[tools]
+erlang = "28"
+elixir = "1.19"
+
+[env]
+_.file = ".env"
+DATA_LIBRARY_PATH = "../data-library"
+DATA_SOURCES_PATH = "../data-sources"
+
+[tasks.setup]
+description = "Install dependencies and compile"
+run = "mix deps.get && mix compile"
+
+[tasks.serve]
+description = "Start Phoenix dev server on port 4000"
+run = "mix phx.server"
+raw = true
+
+[tasks.iex]
+description = "Start interactive shell with Phoenix"
+run = "iex -S mix phx.server"
+raw = true
+
+[tasks.compile]
+description = "Compile the project"
+run = "mix compile --warnings-as-errors"
+
+[tasks.test]
+description = "Run test suite"
+run = "mix test"
+
+[tasks.format]
+description = "Format all Elixir files"
+run = "mix format"
+
+[tasks.lint]
+description = "Run formatter check and compile warnings"
+run = "mix format --check-formatted && mix compile --warnings-as-errors"
+
+[tasks.ingest]
+description = "Full pipeline: OCR → Normalize → Export (usage: mise run ingest -- <pdf> [--slug <slug> ...])"
+run = "mix pdf.ingest"
+raw = true
+
+[tasks.ocr]
+description = "Stage 1: Extract text from PDF via GLM-OCR (usage: mise run ocr -- <pdf> --slug <slug>)"
+run = "mix pdf.ocr"
+raw = true
+
+[tasks.normalize]
+description = "Stage 2: Parse OCR text into structured JSON (usage: mise run normalize -- --slug <slug> --code <code> --lang <lang>)"
+run = "mix pdf.normalize"
+raw = true
+
+[tasks.translate]
+description = "Stage 3: Translate book into target languages (usage: mise run translate -- --slug <slug>)"
+run = "mix pdf.translate"
+raw = true
+
+[tasks.export]
+description = "Stage 4: Export to data-library format (usage: mise run export -- --slug <slug>)"
+run = "mix pdf.export"
+raw = true
+
+[tasks.clean]
+description = "Remove build artifacts"
+run = "rm -rf _build/ deps/"
+
+[tasks.reset]
+description = "Clean and reinstall everything"
+run = "mise run clean && mise run setup"

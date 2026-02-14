@@ -1,0 +1,19 @@
+{
+  "chapter_patterns": [
+    "^#+\\s+Chapter\\s+\\d+",
+    "^#+\\s+CHAPTER\\s+[IVXLCDM]+",
+    "^Chapter\\s+\\d+[.:]?\\s+.+",
+    "^CHAPTER\\s+[IVXLCDM]+[.:]?\\s+.+"
+  ],
+  "paragraph_separator": "\\n\\n",
+  "strip_patterns": [
+    "^\\d{1,3}$",
+    "^Page \\d+",
+    "^- \\d+ -$"
+  ],
+  "speaker_patterns": {
+    "dialogue_dash": "^[—–]\\s*",
+    "known_speakers": []
+  },
+  "default_speaker": "Narrator"
+}
