@@ -4,6 +4,7 @@ defmodule PdfPipelineWeb.DashboardLive do
   alias PdfPipeline.Store.Job
   alias PdfPipeline.Pipeline
   alias PdfPipeline.Stages
+  alias PdfPipeline.Sources
 
   @impl true
   def mount(_params, _session, socket) do
@@ -12,19 +13,18 @@ defmodule PdfPipelineWeb.DashboardLive do
     end
 
     jobs = Job.list()
+    sources = Sources.list_sources()
+    source_dir = Sources.source_dir()
 
     {:ok,
      socket
      |> assign(:jobs, jobs)
+     |> assign(:sources, sources)
+     |> assign(:source_dir, source_dir)
+     |> assign(:selected_source, nil)
+     |> assign(:selected_book, nil)
      |> assign(:work_status, %{})
-     |> assign(:form, to_form(%{
-       "slug" => "",
-       "code" => "",
-       "lang" => "fr",
-       "title" => "",
-       "rules" => "default",
-       "year" => ""
-     }))
+     |> assign(:form, to_form(empty_form()))
      |> allow_upload(:pdf, accept: ~w(.pdf), max_entries: 1, max_file_size: 50_000_000)}
   end
 
@@ -37,38 +37,108 @@ defmodule PdfPipelineWeb.DashboardLive do
     {:noreply, assign(socket, :form, to_form(params))}
   end
 
-  @impl true
-  def handle_event("start_pipeline", params, socket) do
-    uploaded_files =
-      consume_uploaded_entries(socket, :pdf, fn %{path: path}, _entry ->
-        dest = Path.join(System.tmp_dir!(), "pdf_pipeline_#{System.unique_integer([:positive])}.pdf")
-        File.cp!(path, dest)
-        {:ok, dest}
-      end)
+  def handle_event("select_source", %{"path" => path}, socket) do
+    source = Enum.find(socket.assigns.sources, &(&1.path == path))
 
-    case uploaded_files do
-      [pdf_path] ->
-        metadata = %{
-          slug: params["slug"],
-          code: String.upcase(params["code"]),
-          primary_lang: params["lang"],
-          title: params["title"],
-          publication_year: parse_year(params["year"])
-        }
+    case source do
+      nil ->
+        {:noreply, socket}
 
-        opts = [rules: params["rules"] || "default"]
-
-        Task.start(fn ->
-          Pipeline.run(pdf_path, metadata, opts)
-        end)
-
+      %{books: [single_book]} ->
+        # Single book — fill form immediately
         {:noreply,
          socket
-         |> put_flash(:info, "Pipeline started! Processing...")
-         |> assign(:jobs, Job.list())}
+         |> assign(:selected_source, source)
+         |> assign(:selected_book, single_book)
+         |> assign(:form, to_form(form_from_sidecar(single_book)))}
 
-      _ ->
-        {:noreply, put_flash(socket, :error, "Please upload a PDF file")}
+      %{books: [_ | _]} ->
+        # Anthology — show book picker, prefill shared fields
+        {:noreply,
+         socket
+         |> assign(:selected_source, source)
+         |> assign(:selected_book, nil)
+         |> assign(:form, to_form(form_from_sidecar(source.sidecar)))}
+
+      %{books: []} ->
+        # No sidecar metadata
+        {:noreply,
+         socket
+         |> assign(:selected_source, source)
+         |> assign(:selected_book, nil)}
+    end
+  end
+
+  def handle_event("select_book", %{"index" => index_str}, socket) do
+    index = String.to_integer(index_str)
+    source = socket.assigns.selected_source
+
+    case Enum.at(source.books, index) do
+      nil ->
+        {:noreply, socket}
+
+      book ->
+        {:noreply,
+         socket
+         |> assign(:selected_book, book)
+         |> assign(:form, to_form(form_from_sidecar(book)))}
+    end
+  end
+
+  def handle_event("clear_source", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:selected_source, nil)
+     |> assign(:selected_book, nil)
+     |> assign(:form, to_form(empty_form()))}
+  end
+
+  @impl true
+  def handle_event("start_pipeline", params, socket) do
+    source = socket.assigns.selected_source
+
+    # Determine the PDF path: from selected source or from upload
+    {pdf_path, socket} =
+      if source do
+        {source.path, socket}
+      else
+        uploaded_files =
+          consume_uploaded_entries(socket, :pdf, fn %{path: path}, _entry ->
+            dest = Path.join(System.tmp_dir!(), "pdf_pipeline_#{System.unique_integer([:positive])}.pdf")
+            File.cp!(path, dest)
+            {:ok, dest}
+          end)
+
+        case uploaded_files do
+          [path] -> {path, socket}
+          _ -> {nil, socket}
+        end
+      end
+
+    if pdf_path do
+      metadata = %{
+        slug: params["slug"],
+        code: String.upcase(params["code"] || ""),
+        primary_lang: params["lang"],
+        title: params["title"],
+        publication_year: parse_year(params["year"])
+      }
+
+      opts = [rules: params["rules"] || "default"]
+
+      Task.start(fn ->
+        Pipeline.run(pdf_path, metadata, opts)
+      end)
+
+      {:noreply,
+       socket
+       |> put_flash(:info, "Pipeline started! Processing...")
+       |> assign(:jobs, Job.list())
+       |> assign(:selected_source, nil)
+       |> assign(:selected_book, nil)
+       |> assign(:form, to_form(empty_form()))}
+    else
+      {:noreply, put_flash(socket, :error, "Please select a source PDF or upload a file")}
     end
   end
 
@@ -109,6 +179,32 @@ defmodule PdfPipelineWeb.DashboardLive do
     {:noreply, assign(socket, :jobs, Job.list())}
   end
 
+  # Helpers
+
+  defp empty_form do
+    %{
+      "slug" => "",
+      "code" => "",
+      "lang" => "fr",
+      "title" => "",
+      "rules" => "default",
+      "year" => ""
+    }
+  end
+
+  defp form_from_sidecar(nil), do: empty_form()
+
+  defp form_from_sidecar(meta) do
+    %{
+      "slug" => meta["slug"] || "",
+      "code" => meta["code"] || "",
+      "lang" => meta["language"] || "fr",
+      "title" => meta["title"] || "",
+      "rules" => meta["rules"] || "default",
+      "year" => to_string(meta["year"] || "")
+    }
+  end
+
   defp parse_year(""), do: nil
   defp parse_year(nil), do: nil
 
@@ -117,6 +213,14 @@ defmodule PdfPipelineWeb.DashboardLive do
       {n, _} -> n
       :error -> nil
     end
+  end
+
+  defp format_size(bytes) when bytes < 1_000_000 do
+    "#{Float.round(bytes / 1_000, 0)} KB"
+  end
+
+  defp format_size(bytes) do
+    "#{Float.round(bytes / 1_000_000, 1)} MB"
   end
 
   defp status_badge(status) do
@@ -151,15 +255,133 @@ defmodule PdfPipelineWeb.DashboardLive do
           </p>
         </div>
 
+        <%!-- Source Library --%>
+        <div class="card bg-base-200 shadow-sm">
+          <div class="card-body">
+            <h2 class="card-title">Source Library</h2>
+            <p class="text-sm text-base-content/60 mb-3">
+              <span class="font-mono text-xs">{@source_dir}</span>
+            </p>
+
+            <%= if @sources == [] do %>
+              <div class="text-center py-6 text-base-content/40">
+                <p>No PDFs found in source directory.</p>
+                <p class="text-xs mt-1">
+                  Set <code>DATA_SOURCES_PATH</code> in your <code>.env</code> file.
+                </p>
+              </div>
+            <% else %>
+              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                <%= for source <- @sources do %>
+                  <button
+                    type="button"
+                    phx-click="select_source"
+                    phx-value-path={source.path}
+                    class={"card card-compact bg-base-100 cursor-pointer hover:shadow-md transition-shadow border-2 #{if @selected_source && @selected_source.path == source.path, do: "border-primary", else: "border-transparent"}"}
+                  >
+                    <div class="card-body">
+                      <div class="flex items-start gap-2">
+                        <span class="text-xl">
+                          <%= if source.sidecar, do: "📖", else: "📄" %>
+                        </span>
+                        <div class="min-w-0 text-left">
+                          <p class="font-medium text-sm truncate">
+                            <%= if source.sidecar do %>
+                              {source.sidecar["title"]}
+                            <% else %>
+                              {source.filename}
+                            <% end %>
+                          </p>
+                          <p class="text-xs text-base-content/50">
+                            {source.relative} · {format_size(source.size)}
+                          </p>
+                          <%= if source.sidecar do %>
+                            <div class="flex gap-1 mt-1 flex-wrap">
+                              <span class="badge badge-xs">{source.sidecar["language"]}</span>
+                              <%= if source.sidecar["type"] == "anthology" do %>
+                                <span class="badge badge-xs badge-outline">
+                                  {length(source.books)} books
+                                </span>
+                              <% end %>
+                              <%= if source.sidecar["tradition"] do %>
+                                <span class="badge badge-xs badge-ghost">
+                                  {source.sidecar["tradition"]}
+                                </span>
+                              <% end %>
+                            </div>
+                          <% end %>
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                <% end %>
+              </div>
+            <% end %>
+          </div>
+        </div>
+
+        <%!-- Book Picker (for anthologies) --%>
+        <%= if @selected_source && length(@selected_source.books) > 1 do %>
+          <div class="card bg-base-200 shadow-sm">
+            <div class="card-body">
+              <div class="flex items-center justify-between">
+                <h2 class="card-title">
+                  Select Book from "{@selected_source.sidecar["title"]}"
+                </h2>
+                <button type="button" phx-click="clear_source" class="btn btn-ghost btn-sm">
+                  Clear
+                </button>
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mt-2">
+                <%= for {book, idx} <- Enum.with_index(@selected_source.books) do %>
+                  <button
+                    type="button"
+                    phx-click="select_book"
+                    phx-value-index={idx}
+                    class={"card card-compact bg-base-100 cursor-pointer hover:shadow-md transition-shadow border-2 #{if @selected_book && @selected_book["slug"] == book["slug"], do: "border-primary", else: "border-transparent"}"}
+                  >
+                    <div class="card-body">
+                      <p class="font-medium text-sm">{book["title"]}</p>
+                      <p class="text-xs text-base-content/50">
+                        {book["code"]} · {book["year"]}
+                      </p>
+                    </div>
+                  </button>
+                <% end %>
+              </div>
+            </div>
+          </div>
+        <% end %>
+
         <%!-- New Job Form --%>
         <div class="card bg-base-200 shadow-sm">
           <div class="card-body">
-            <h2 class="card-title">New Ingestion Job</h2>
+            <div class="flex items-center justify-between">
+              <h2 class="card-title">
+                <%= if @selected_source do %>
+                  Pipeline Configuration
+                <% else %>
+                  New Ingestion Job
+                <% end %>
+              </h2>
+              <%= if @selected_source do %>
+                <button type="button" phx-click="clear_source" class="btn btn-ghost btn-sm">
+                  Clear
+                </button>
+              <% end %>
+            </div>
+
+            <%= if @selected_source do %>
+              <div class="flex items-center gap-2 text-sm text-base-content/60 mb-2">
+                <span>📄</span>
+                <span class="font-mono text-xs">{@selected_source.relative}</span>
+              </div>
+            <% end %>
 
             <.form for={@form} phx-change="validate" phx-submit="start_pipeline" class="space-y-4">
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <%= if !@selected_source do %>
                 <div class="form-control">
-                  <label class="label"><span class="label-text">PDF File</span></label>
+                  <label class="label"><span class="label-text">Upload PDF (or select from source library above)</span></label>
                   <.live_file_input upload={@uploads.pdf} class="file-input file-input-bordered w-full" />
                   <%= for entry <- @uploads.pdf.entries do %>
                     <div class="text-sm mt-1 text-base-content/60">
@@ -168,7 +390,9 @@ defmodule PdfPipelineWeb.DashboardLive do
                     </div>
                   <% end %>
                 </div>
+              <% end %>
 
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="form-control">
                   <label class="label"><span class="label-text">Book Slug</span></label>
                   <input
@@ -253,7 +477,7 @@ defmodule PdfPipelineWeb.DashboardLive do
 
           <%= if @jobs == [] do %>
             <div class="text-center py-12 text-base-content/40">
-              <p>No jobs yet. Upload a PDF to get started.</p>
+              <p>No jobs yet. Select a source PDF or upload one to get started.</p>
             </div>
           <% else %>
             <div class="overflow-x-auto">
