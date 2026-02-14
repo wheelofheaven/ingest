@@ -1,5 +1,6 @@
 {
   "chapter_patterns": [
+    "^# [A-ZÀ-Ü][A-ZÀ-Ü0-9 '!,.:;()\\-]{2,}$",
     "^#+\\s+Chapter\\s+\\d+",
     "^#+\\s+CHAPTER\\s+[IVXLCDM]+",
     "^Chapter\\s+\\d+[.:]?\\s+.+",

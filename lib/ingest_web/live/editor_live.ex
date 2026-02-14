@@ -18,6 +18,7 @@ defmodule IngestWeb.EditorLive do
          |> assign(:source, source)
          |> assign(:selected_chapter, 1)
          |> assign(:editing_paragraph, nil)
+         |> assign(:editing_chapter, nil)
          |> assign(:selected_refs, MapSet.new())
          |> assign(:repeated_patterns, repeated)
          |> assign(:show_patterns, false)
@@ -231,6 +232,90 @@ defmodule IngestWeb.EditorLive do
      |> put_flash(:info, "Paragraphs merged")}
   end
 
+  # -- Chapter editing --
+
+  def handle_event("rename_chapter", %{"chapter" => n_str, "title" => title}, socket) do
+    n = String.to_integer(n_str)
+    book = socket.assigns.book
+
+    chapters =
+      Enum.map(book.chapters, fn ch ->
+        if ch.n == n, do: %{ch | title: String.trim(title)}, else: ch
+      end)
+
+    {:noreply,
+     socket
+     |> assign(:book, %{book | chapters: chapters})
+     |> assign(:editing_chapter, nil)
+     |> assign(:dirty, true)
+     |> put_flash(:info, "Chapter #{n} renamed")}
+  end
+
+  def handle_event("edit_chapter_title", %{"chapter" => n_str}, socket) do
+    {:noreply, assign(socket, :editing_chapter, String.to_integer(n_str))}
+  end
+
+  def handle_event("cancel_edit_chapter", _params, socket) do
+    {:noreply, assign(socket, :editing_chapter, nil)}
+  end
+
+  def handle_event("split_chapter_here", %{"ref-id" => ref_id}, socket) do
+    book = socket.assigns.book
+    chapter_n = socket.assigns.selected_chapter
+    book = split_chapter_at_paragraph(book, chapter_n, ref_id)
+
+    {:noreply,
+     socket
+     |> assign(:book, book)
+     |> assign(:dirty, true)
+     |> put_flash(:info, "Chapter split at paragraph #{ref_id}")}
+  end
+
+  def handle_event("merge_chapter_with_next", %{"chapter" => n_str}, socket) do
+    n = String.to_integer(n_str)
+    book = socket.assigns.book
+    book = merge_chapters(book, n)
+
+    {:noreply,
+     socket
+     |> assign(:book, book)
+     |> assign(:dirty, true)
+     |> put_flash(:info, "Chapters merged")}
+  end
+
+  def handle_event("delete_chapter", %{"chapter" => n_str}, socket) do
+    n = String.to_integer(n_str)
+    book = socket.assigns.book
+
+    chapters = Enum.reject(book.chapters, &(&1.n == n))
+    book = %{book | chapters: chapters} |> Book.assign_ref_ids()
+
+    new_selected = min(socket.assigns.selected_chapter, length(chapters))
+    new_selected = max(new_selected, 1)
+
+    {:noreply,
+     socket
+     |> assign(:book, book)
+     |> assign(:selected_chapter, new_selected)
+     |> assign(:dirty, true)
+     |> put_flash(:info, "Chapter deleted")}
+  end
+
+  def handle_event("add_chapter", _params, socket) do
+    book = socket.assigns.book
+    new_n = length(book.chapters) + 1
+
+    new_chapter = Chapter.new(%{n: new_n, title: "New Chapter", paragraphs: []})
+    book = %{book | chapters: book.chapters ++ [new_chapter]} |> Book.assign_ref_ids()
+
+    {:noreply,
+     socket
+     |> assign(:book, book)
+     |> assign(:selected_chapter, new_n)
+     |> assign(:dirty, true)
+     |> put_flash(:info, "Chapter #{new_n} added")}
+  end
+
   # -- Save to work directory --
 
   def handle_event("save_to_disk", _params, socket) do
@@ -325,6 +410,59 @@ defmodule IngestWeb.EditorLive do
       |> then(&%{chapter | paragraphs: &1})
     else
       chapter
+    end
+  end
+
+  defp split_chapter_at_paragraph(book, chapter_n, ref_id) do
+    chapters =
+      Enum.flat_map(book.chapters, fn chapter ->
+        if chapter.n == chapter_n do
+          case Enum.find_index(chapter.paragraphs, &(&1.ref_id == ref_id)) do
+            nil ->
+              [chapter]
+
+            0 ->
+              [chapter]
+
+            idx ->
+              {before_paras, after_paras} = Enum.split(chapter.paragraphs, idx)
+
+              # Use the text of the split paragraph as hint for the new chapter title
+              first_para_text = List.first(after_paras)
+              new_title =
+                if first_para_text,
+                  do: String.slice(first_para_text.text, 0, 60) |> String.trim(),
+                  else: "New Chapter"
+
+              [
+                %{chapter | paragraphs: before_paras},
+                Chapter.new(%{n: chapter.n + 1, title: new_title, paragraphs: after_paras})
+              ]
+          end
+        else
+          [chapter]
+        end
+      end)
+
+    %{book | chapters: chapters} |> Book.assign_ref_ids()
+  end
+
+  defp merge_chapters(book, chapter_n) do
+    chapters = book.chapters
+    idx = Enum.find_index(chapters, &(&1.n == chapter_n))
+
+    if idx && idx < length(chapters) - 1 do
+      current = Enum.at(chapters, idx)
+      next = Enum.at(chapters, idx + 1)
+      merged = %{current | paragraphs: current.paragraphs ++ next.paragraphs}
+
+      chapters
+      |> List.delete_at(idx + 1)
+      |> List.replace_at(idx, merged)
+      |> then(&%{book | chapters: &1})
+      |> Book.assign_ref_ids()
+    else
+      book
     end
   end
 
@@ -452,19 +590,62 @@ defmodule IngestWeb.EditorLive do
           <div class="lg:col-span-1">
             <div class="card bg-base-200">
               <div class="card-body p-3">
-                <h3 class="font-semibold text-sm mb-2">Chapters</h3>
+                <div class="flex items-center justify-between mb-2">
+                  <h3 class="font-semibold text-sm">Chapters</h3>
+                  <button phx-click="add_chapter" class="btn btn-ghost btn-xs">+ Add</button>
+                </div>
                 <ul class="menu menu-xs bg-base-100 rounded-box">
                   <%= for ch <- @book.chapters do %>
                     <li>
-                      <button
-                        phx-click="select_chapter"
-                        phx-value-chapter={ch.n}
-                        class={if @selected_chapter == ch.n, do: "active", else: ""}
-                      >
-                        <span class="font-mono text-xs">{ch.n}.</span>
-                        <span class="truncate">{ch.title}</span>
-                        <span class="badge badge-xs badge-ghost">{length(ch.paragraphs)}</span>
-                      </button>
+                      <%= if @editing_chapter == ch.n do %>
+                        <form phx-submit="rename_chapter" class="p-1">
+                          <input type="hidden" name="chapter" value={ch.n} />
+                          <input
+                            type="text"
+                            name="title"
+                            value={ch.title}
+                            class="input input-bordered input-xs w-full mb-1"
+                            autofocus
+                          />
+                          <div class="flex gap-1">
+                            <button type="submit" class="btn btn-primary btn-xs flex-1">Save</button>
+                            <button type="button" phx-click="cancel_edit_chapter" class="btn btn-ghost btn-xs">X</button>
+                          </div>
+                        </form>
+                      <% else %>
+                        <div class="flex items-center group">
+                          <button
+                            phx-click="select_chapter"
+                            phx-value-chapter={ch.n}
+                            class={"flex-1 text-left #{if @selected_chapter == ch.n, do: "active", else: ""}"}
+                          >
+                            <span class="font-mono text-xs">{ch.n}.</span>
+                            <span class="truncate">{ch.title}</span>
+                            <span class="badge badge-xs badge-ghost">{length(ch.paragraphs)}</span>
+                          </button>
+                          <div class="hidden group-hover:flex gap-0.5 ml-1">
+                            <button
+                              phx-click="edit_chapter_title"
+                              phx-value-chapter={ch.n}
+                              class="btn btn-ghost btn-xs px-1"
+                              title="Rename"
+                            >R</button>
+                            <button
+                              phx-click="merge_chapter_with_next"
+                              phx-value-chapter={ch.n}
+                              class="btn btn-ghost btn-xs px-1"
+                              title="Merge with next"
+                            >M</button>
+                            <button
+                              phx-click="delete_chapter"
+                              phx-value-chapter={ch.n}
+                              class="btn btn-ghost btn-xs px-1 text-error"
+                              title="Delete chapter"
+                              data-confirm={"Delete chapter #{ch.n}: #{ch.title}?"}
+                            >X</button>
+                          </div>
+                        </div>
+                      <% end %>
                     </li>
                   <% end %>
                 </ul>
@@ -561,6 +742,14 @@ defmodule IngestWeb.EditorLive do
                         <div class="flex gap-0.5">
                           <button phx-click="edit_paragraph" phx-value-ref-id={para.ref_id} class="btn btn-ghost btn-xs">Edit</button>
                           <button phx-click="merge_with_next" phx-value-ref-id={para.ref_id} class="btn btn-ghost btn-xs">Merge</button>
+                          <button
+                            phx-click="split_chapter_here"
+                            phx-value-ref-id={para.ref_id}
+                            class="btn btn-ghost btn-xs text-info"
+                            title="Start a new chapter from this paragraph"
+                          >
+                            Ch.Split
+                          </button>
                           <button
                             phx-click="delete_paragraph"
                             phx-value-ref-id={para.ref_id}
